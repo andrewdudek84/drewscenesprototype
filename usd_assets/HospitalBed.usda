@@ -1,0 +1,24 @@
+#usda 1.0
+(
+    defaultPrim = "HospitalBed"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Hospital bed geometry lives in a sibling OBJ. The MTL and textures next to
+# the OBJ are loaded automatically by Babylon's OBJ loader.
+def Xform "HospitalBed"
+{
+    def Xform "Body" (
+        kind = "reference"
+    )
+    {
+        custom asset assetInfo:source = @./HospitalBed/Hospital_Bed.obj@
+        # The OBJ was exported from 3ds Max in inches; convert to meters so it
+        # matches the scene's metersPerUnit = 1.
+        double3 xformOp:translate = (0, 0, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (0.0254, 0.0254, 0.0254)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+}

@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "Forklift"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# The forklift body geometry + textures live in a sibling GLB.
+# `kind = "reference"` plus `assetInfo:source` tells drewscenes to load that
+# file into the viewport. The xformOp values still control placement in the scene.
+def Xform "Forklift"
+{
+    def Xform "Body" (
+        kind = "reference"
+    )
+    {
+        custom asset assetInfo:source = @./Forklift/Forklift.glb@
+        double3 xformOp:translate = (0, 0, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1, 1, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+}

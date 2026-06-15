@@ -1,0 +1,131 @@
+#usda 1.0
+(
+    defaultPrim = "Stairs"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Eight-step staircase. Each step is a unit cube scaled to
+# 1.2m wide x 0.18m rise x 0.25m run, stacked along +Z.
+def Xform "Stairs"
+{
+    def Xform "Step_1" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.09, 0.125)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_2" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.27, 0.375)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_3" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.45, 0.625)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_4" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.63, 0.875)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_5" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.81, 1.125)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_6" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 0.99, 1.375)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_7" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 1.17, 1.625)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+
+    def Xform "Step_8" (
+        kind = "box"
+    )
+    {
+        double3 xformOp:translate = (0, 1.35, 1.875)
+        float3 xformOp:rotateXYZ = (0, 0, 0)
+        float3 xformOp:scale = (1.2, 0.18, 0.25)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def Cube "geom"
+        {
+            color3f[] primvars:displayColor = [(0.7, 0.65, 0.6)]
+        }
+    }
+}
