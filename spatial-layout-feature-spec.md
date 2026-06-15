@@ -144,10 +144,16 @@ Decomposition is bounded by practical limits. Very large or complex USD files ar
 ### 7.2 Geometry authoring
 
 - FR-5: Drop basic shapes (box, cylinder, plane) onto the type's or instance's geometry.
-  - **FR-5.1 (implemented):** Shapes palette with **box, cylinder, sphere, plane**. Dragging a palette item onto the viewport spawns a prim at the picked ground point; dragging onto a hierarchy node spawns the prim parented to that node (root "Scene" target parents to null).
-  - **FR-5.2 (implemented):** Each prim has an editable color (color picker + hex input in the Properties panel) and unique auto-named label (e.g. `Box_1`, `Cylinder_2`).
+  - **FR-5.1 (implemented):** Shapes palette with **group, box, cylinder, sphere, cone, plane** (group is first). Dragging a palette item onto the viewport spawns a prim at the picked ground point; dragging onto a hierarchy node spawns the prim parented to that node (root "Scene" target parents to null). A **group** prim is an empty transform node — no geometry of its own, useful as a parent for organizing children.
+  - **FR-5.2 (implemented):** Each prim has an editable color (color picker + hex input in the Properties panel) and unique auto-named label (e.g. `Box_1`, `Cylinder_2`). Group prims and reference prims hide the color row in the Properties panel.
+  - **FR-5.3 (implemented):** Every prim in the Hierarchy panel has a **trash icon** (visible on hover / focus / selection) that deletes it and cascades to all its descendants.
 - FR-6: Drop SimReady library assets onto geometry.
+  - **FR-6.1 (implemented):** **Assets palette** (bottom panel, alongside Shapes) lists every `*.usda` file in `usd_assets/` with a generated icon and label. Drag an asset onto the viewport to instantiate it at the picked ground point. The drop wraps the asset's root Xforms in a single **Group** prim positioned at the drop point so the asset shows up as one movable object in the hierarchy.
+  - **FR-6.2 (implemented):** Each asset's USDA file declares an external geometry payload via a `reference` Xform prim with `custom asset assetInfo:source = @./relative/path@`. Supported payload formats: **GLB** (Forklift, shelves) and **OBJ** (Hospital Bed). USDA `scale` on the wrapping Xform lets the asset author convert units when the payload is not in meters (e.g. `0.0254` for inches → meters).
+  - **FR-6.3 (implemented):** Bundled assets: **Forklift** (GLB with PBR textures), **shelves_01** (GLB), **Hospital Bed** (OBJ + MTL + PNG textures), **stairs** (primitive-only). Assets are served at `/usd_assets/*` in dev (Vite middleware) and copied to `dist/usd_assets/` on build, preserving relative paths so MTL → texture references resolve.
 - FR-7: Import one or more USD files into the item; reference one or more OneLake folders of USD assets.
+  - **FR-7.1 (implemented, partial):** The TopBar **Import** action accepts a `.usda` / `.usd` file and replaces the current scene with the parsed prim tree. **Export** writes the current scene back out as a `.usda` file. Round-trip preserves prim hierarchy, name, kind, transforms, color, and `assetInfo:source` for reference prims.
+  - **FR-7.2 (implemented):** Reference prims (`kind = "reference"`) round-trip the external payload path; the Properties panel exposes the path as an editable **Source** input.
 - FR-8: Per-instance geometry override; revert to type default.
 - FR-9: Promote an instance's geometry to the type's default.
 
@@ -175,6 +181,7 @@ Decomposition is bounded by practical limits. Very large or complex USD files ar
 - FR-16: Snap to floor, walls, configurable grid.
   - **FR-16.1 (implemented, partial):** Move snap = **1 m** (grid minor tick). Rotate snap = **5°**. Scale snap = **0.25**. No floor/wall snap yet.
 - FR-17: Configurable units; distance measurement.
+  - **FR-17.1 (implemented):** **Measure tool** in the left toolbar (hotkey **M**, click the icon again to toggle off). First click drops a yellow start marker; mouse-move shows a live dashed line and `X.XX m` label that follows the cursor; second click commits the end marker. A third click restarts the measurement. Picking snaps to the nearest **bounding-box corner** of the mesh under the cursor (within 0.5 m), otherwise to the raw surface point or the floor. Switching to any other tool clears the measurement.
 - FR-18: Multi-select, copy, distribute, rotate, mirror.
 - FR-19: Undo / redo across all actions.
 - FR-20: Named camera positions.
@@ -290,12 +297,13 @@ Measured against the "5x5" north star and product-led growth.
 
 ## 15. Current prototype status
 
-This section is a snapshot of what the `drewscenes` prototype in this repo actually does today. It is a single-user, in-memory React + Babylon.js sandbox — there is no ontology, no entity-type vs. instance distinction, no persistence, and no Fabric integration yet. "Prim" in the code is the prototype's stand-in for a future entity instance.
+This section is a snapshot of what the `drewscenes` prototype in this repo actually does today. It is a single-user, in-memory React + Babylon.js sandbox — there is no ontology, no entity-type vs. instance distinction, no Fabric integration, and no server-side persistence. "Prim" in the code is the prototype's stand-in for a future entity instance. The on-disk contract for round-tripping a scene is **USDA**.
 
 ### 15.1 App shell
 
 - React 19 + Vite + TypeScript app rendering Babylon.js into a single viewport.
-- Four-panel layout: **Left toolbar** (tools), **Viewport** (3D canvas + camera overlay), **Hierarchy panel** (right-top), **Properties panel** (right-bottom), **Shapes palette** (bottom).
+- Top bar with a goat-face logo, editable scene name, **Import** / **Export** (USDA), and a settings dropdown with **Light / Dark** theme (defaults to Light, persisted to `localStorage`).
+- Four-panel layout: **Left toolbar** (tools), **Viewport** (3D canvas + camera overlay), **Hierarchy panel** (right-top), **Properties panel** (right-bottom), **Bottom panel** with two tabs — **Shapes palette** and **Assets palette**.
 
 ### 15.2 Scene and camera
 
@@ -303,12 +311,13 @@ This section is a snapshot of what the `drewscenes` prototype in this repo actua
 - Default camera: 3/4 perspective view (`alpha = π/4`, `beta = π/3`, `radius = 25`) targeting the origin.
 - 10,000 × 10,000 m ground on X–Z with `GridMaterial` (1 m minor / 10 m major, opacity 0.25). Y is up; 1 unit = 1 meter.
 - Origin axis indicators (2 m each): X red, Y green, Z blue.
-- Hemispheric light from `+Y`.
+- Lighting: hemispheric fill (white above, cool below) plus a warm directional key light so PBR and OBJ-loaded materials read correctly.
 - Camera-view overlay (top-right): **Top / Bottom / Front / Back / Left / Right** switch to an axis-aligned orthographic view; **Perspective** returns to the default angle. Ortho frustum tracks the camera radius.
+- **Focus** button in the left toolbar (hotkey **F**) resets the camera to the default perspective view.
 
 ### 15.3 Shape authoring
 
-- Shapes palette: **box, cylinder, sphere, plane**. All unit-sized.
+- Shapes palette: **group, box, cylinder, sphere, cone, plane**. All unit-sized; group is an empty transform node with no geometry.
 - Drop a palette item:
   - on the viewport → spawn at the picked ground point, lifted by the shape's half-height so it rests on the ground.
   - on a hierarchy node → spawn parented to that node at the parent's local origin.
@@ -316,37 +325,64 @@ This section is a snapshot of what the `drewscenes` prototype in this repo actua
 - Auto-naming per kind: `Box_1`, `Box_2`, `Cylinder_1`, etc.
 - IDs are `crypto.randomUUID()`.
 
-### 15.4 Selection and manipulation
+### 15.4 Assets palette and reference prims
+
+- Bottom panel **Assets** tab lists every `usd_assets/*.usda` file with an auto-generated SVG icon and label.
+- Bundled assets:
+  - **Forklift** — GLB payload with PBR textures.
+  - **shelves_01** — GLB payload.
+  - **Hospital Bed** — OBJ + MTL + PNG textures, with USDA-level `scale = (0.0254, …)` for inches → meters.
+  - **stairs** — primitive-only USDA, no external payload.
+- Dragging an asset onto the viewport wraps its root Xforms in a single **Group** prim placed at the drop point.
+- The external payload is declared as a `reference` Xform prim with `custom asset assetInfo:source = @./relative/path@`. Babylon's glTF and OBJ loaders are wired in; OBJ loader defaults are tuned (`OPTIMIZE_WITH_UV = false`, `COMPUTE_NORMALS = true`, `OPTIMIZE_NORMALS = true`) for robust shading on dense exported meshes, and loaded materials are sanitized (back-face culling off, opaque transparency mode, alpha forced to 1) to avoid stray translucency.
+- Static asset serving: a custom Vite plugin maps `/usd_assets/*` to `usd_assets/` in dev (middleware) and copies the folder to `dist/usd_assets/` on build, preserving filenames so OBJ → MTL → texture relative paths resolve.
+
+### 15.5 USDA round-trip
+
+- **Export** writes the current scene to a `.usda` file: scene name, prim hierarchy, kind, transforms (Euler radians), color, and `custom asset assetInfo:source` for reference prims.
+- **Import** parses a `.usda` file and replaces the scene. The parser infers `kind = 'reference'` when an Xform carries an `assetInfo:source`.
+- The on-disk format is the contract; the in-memory model is rebuilt from it on import.
+
+### 15.6 Selection and manipulation
 
 - Click a mesh in the viewport or a row in the Hierarchy panel to select; click empty space, the ground, or the Hierarchy background to deselect.
 - Selected prim gets a blue edge outline.
-- Left toolbar tools: **Select**, **Move**, **Rotate**, **Scale**. Each non-Select tool shows the matching Babylon gizmo on the selected prim.
+- Left toolbar tools: **Select**, **Move**, **Rotate**, **Scale**, **Measure**, plus a **Focus** button. Each non-Select non-Measure tool shows the matching Babylon gizmo on the selected prim.
 - Gizmo handles tinted X red / Y green / Z blue.
 - Snapping: position **1 m**, rotation **5°**, scale **0.25**.
 - Rotation rings are world-axis aligned and rotation is stored on the mesh as a quaternion; the prototype writes Euler radians back to state on drag-end.
 
-### 15.5 Hierarchy
+### 15.7 Measurement tool
+
+- Activated via the ruler icon in the left toolbar or the **M** hotkey; click the icon again to toggle off.
+- Click 1 drops a yellow start sphere; mouse-move shows a live dashed line plus a yellow `X.XX m` label at the midpoint; click 2 drops the end sphere and locks the measurement; click 3 restarts.
+- Picking snaps to the nearest **bounding-box corner** of the mesh under the cursor (within 0.5 m), otherwise the raw surface point or the floor.
+- Switching to any other tool clears the measurement and restores the default cursor.
+
+### 15.8 Hierarchy
 
 - Flat list grouped into a tree by `parentId` under a synthetic "Scene" root.
 - Drag a prim row onto another prim row to **reparent** under it; drag onto the Scene row to unparent.
 - Reparenting **preserves world transform** (local TRS is recomputed from the new parent's world matrix). Cycles are prevented.
 - Drag a palette shape onto a tree row to spawn a new child under it.
+- Each row has a **trash icon** (revealed on hover / focus / selection) that deletes the prim and cascades to all its descendants.
 
-### 15.6 Properties
+### 15.9 Properties
 
-- For the selected prim: read-only **ID** and **Kind**; editable **Name**, **Position (x/y/z, meters)**, **Rotation (x/y/z, degrees)**, **Color** (color picker + hex input).
+- For the selected prim: read-only **ID** and **Kind**; editable **Name**, **Position (x/y/z, meters)**, **Rotation (x/y/z, degrees)**.
+- **Color** row for primitive shapes only (hidden for groups and references).
+- **Source** row for reference prims only — editable text input bound to `assetInfo:source` (the USDA payload path).
 - All edits round-trip through the same state the viewport reads from, so the gizmo and property fields stay in sync.
 
-### 15.7 Not yet in the prototype
+### 15.10 Not yet in the prototype
 
 These are called out in the spec but are not in the prototype:
 
-- Entity types vs. instances (everything is a single "prim" today).
+- Entity types vs. instances (everything is a single "prim" today, although `reference` prims are a step toward type-default geometry).
 - Containment relationship types.
-- USD / SimReady / imported asset support.
 - Per-instance geometry override and promote-to-default.
 - Multi-select, copy, distribute, mirror, undo/redo.
-- Snap to floor/walls; distance measurement; configurable units.
+- Snap to floor/walls; configurable units (units are fixed at meters).
 - Named camera positions.
-- Persistence — closing the tab loses everything.
+- Server-side persistence — the scene lives in memory; closing the tab loses anything that hasn't been exported as USDA.
 - Decomposition, ontology composition, Fabric item wiring.

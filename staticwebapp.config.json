@@ -1,0 +1,19 @@
+{
+  "mimeTypes": {
+    ".js": "application/javascript",
+    ".mjs": "application/javascript",
+    ".jsx": "application/javascript",
+    ".tsx": "application/javascript",
+    ".ts": "application/javascript"
+  },
+  "platform": {
+    "apiRuntime": "node:18"
+  },
+  "navigationFallback": {
+    "rewrite": "/index.html"
+  },
+  "globalHeaders": {
+    "Access-Control-Allow-Origin": "https://ov-streaming.iai-contoso.com",
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS"
+  }
+}
