@@ -11,7 +11,7 @@ const URL_PREFIX = '/usd_assets/';
 // Restrict which assets get copied into the production bundle. Other assets
 // remain available in dev (full usd_assets/ tree) but are excluded from dist/
 // to keep the deploy under SWA upload limits. Empty array = include everything.
-const DIST_ASSET_ALLOWLIST = ['HospitalBed', 'shelves_01'];
+const DIST_ASSET_ALLOWLIST = ['HospitalBed'];
 
 // Make usd_assets/ available at /usd_assets/* in dev (via middleware) and
 // copied verbatim into dist/usd_assets/ on build. We need stable, original

@@ -3,6 +3,8 @@ dist
 .vite
 *.log
 .DS_Store
+# SWA deploy leaves zip artifacts in the repo root.
+/*.zip
 
 # Only ship HospitalBed and shelves_01 assets in the repo. Other usd_assets/
 # entries are kept locally for authoring but not tracked.
