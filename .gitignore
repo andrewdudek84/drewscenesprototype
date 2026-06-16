@@ -3,3 +3,11 @@ dist
 .vite
 *.log
 .DS_Store
+
+# Only ship HospitalBed and shelves_01 assets in the repo. Other usd_assets/
+# entries are kept locally for authoring but not tracked.
+usd_assets/*
+!usd_assets/HospitalBed/
+!usd_assets/HospitalBed.usda
+!usd_assets/shelves_01.glb
+!usd_assets/shelves_01.usda

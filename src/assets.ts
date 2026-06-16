@@ -9,6 +9,14 @@ const assetModules = import.meta.glob('../usd_assets/*.usda', {
   eager: true
 }) as Record<string, string>;
 
+// Only show assets whose binary payloads were actually shipped in the build.
+// In dev (allowlist empty) we expose everything; in prod we filter to match
+// vite.config.ts's DIST_ASSET_ALLOWLIST so the palette never advertises an
+// asset whose binary parts (GLB / OBJ / textures) weren't deployed.
+const ALLOWLIST = (typeof __DIST_ASSET_ALLOWLIST__ !== 'undefined'
+  ? __DIST_ASSET_ALLOWLIST__
+  : []) as string[];
+
 export interface AssetDef {
   id: string;
   label: string;
@@ -29,6 +37,7 @@ export const ASSET_LIBRARY: AssetDef[] = Object.entries(assetModules)
     const label = LABEL_OVERRIDES[id] ?? titleCase(id);
     return { id, label, usda };
   })
+  .filter((a) => ALLOWLIST.length === 0 || ALLOWLIST.includes(a.id))
   .sort((a, b) => a.label.localeCompare(b.label));
 
 export function getAsset(id: string): AssetDef | undefined {

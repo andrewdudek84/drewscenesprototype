@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USD_ASSETS_SRC = path.resolve(__dirname, 'usd_assets');
 const URL_PREFIX = '/usd_assets/';
+// Restrict which assets get copied into the production bundle. Other assets
+// remain available in dev (full usd_assets/ tree) but are excluded from dist/
+// to keep the deploy under SWA upload limits. Empty array = include everything.
+const DIST_ASSET_ALLOWLIST = ['HospitalBed', 'shelves_01'];
 
 // Make usd_assets/ available at /usd_assets/* in dev (via middleware) and
 // copied verbatim into dist/usd_assets/ on build. We need stable, original
@@ -64,12 +68,33 @@ function usdAssetsStatic(): Plugin {
     },
     async closeBundle() {
       const outDir = path.resolve(__dirname, 'dist', 'usd_assets');
-      await copyDir(USD_ASSETS_SRC, outDir);
+      const allow = DIST_ASSET_ALLOWLIST;
+      if (!allow.length) {
+        await copyDir(USD_ASSETS_SRC, outDir);
+        return;
+      }
+      await mkdir(outDir, { recursive: true });
+      const entries = await readdir(USD_ASSETS_SRC, { withFileTypes: true });
+      await Promise.all(
+        entries.map(async (e) => {
+          // Match by directory name, or by stripped filename for top-level
+          // sibling files like `Forklift.usda` or `shelves_01.glb`.
+          const base = e.isDirectory() ? e.name : e.name.replace(/\.[^.]+$/, '');
+          if (!allow.includes(base)) return;
+          const s = path.join(USD_ASSETS_SRC, e.name);
+          const d = path.join(outDir, e.name);
+          if (e.isDirectory()) await copyDir(s, d);
+          else await copyFile(s, d);
+        })
+      );
     }
   };
 }
 
 export default defineConfig({
   plugins: [react(), usdAssetsStatic()],
+  define: {
+    __DIST_ASSET_ALLOWLIST__: JSON.stringify(DIST_ASSET_ALLOWLIST)
+  },
   server: { open: true }
 });

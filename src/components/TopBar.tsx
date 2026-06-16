@@ -77,7 +77,7 @@ export default function TopBar({
     <header className="topbar">
       <div className="topbar-left">
         <Logo />
-        <span className="brand-name">Drew Scene's Prototype V1.0</span>
+        <span className="brand-name">Drew Scenes Prototype V1.0</span>
       </div>
       <div className="topbar-center">
         {editing ? (
