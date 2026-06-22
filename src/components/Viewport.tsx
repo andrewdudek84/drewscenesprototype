@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  AbstractMesh,
   ArcRotateCamera,
   Camera,
   Color3,
@@ -12,12 +13,14 @@ import {
   Matrix,
   Mesh,
   MeshBuilder,
+  type Node,
   PBRMaterial,
   PointerEventTypes,
   Quaternion,
   Scene,
   SceneLoader,
   StandardMaterial,
+  TransformNode,
   Vector3,
   VertexBuffer,
   type LinesMesh
@@ -27,7 +30,7 @@ import '@babylonjs/loaders/OBJ';
 import { OBJFileLoader } from '@babylonjs/loaders/OBJ';
 import type { IPositionGizmo, IRotationGizmo, IScaleGizmo } from '@babylonjs/core';
 import { GridMaterial } from '@babylonjs/materials/grid/gridMaterial';
-import type { PrimNode, PrimTransform, ShapeKind, ToolMode } from '../types';
+import type { AssetMeshNode, PrimNode, PrimTransform, ShapeKind, SubMeshInfo, ToolMode } from '../types';
 import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
 import { resolveAssetUrl } from '../assets';
 import CameraControls, { type CameraView } from './CameraControls';
@@ -47,13 +50,30 @@ interface Props {
   prims: PrimNode[];
   tool: ToolMode;
   selectedId: string | null;
+  /** When set, identifies a specific sub-mesh inside a loaded reference
+   *  asset (GLB/OBJ) that should be highlighted instead of the whole prim. */
+  selectedMeshUid: string | null;
   theme: 'dark' | 'light';
   /** Bump to reset the camera to its initial view (Focus button / F hotkey). */
   focusSignal: number;
   onShapeDropped: (kind: ShapeKind, position: [number, number, number]) => void;
   onAssetDropped: (assetId: string, position: [number, number, number]) => void;
-  onSelect: (id: string | null) => void;
+  onSelect: (id: string | null, meshUid?: string | null) => void;
   onTransform: (id: string, t: Partial<PrimTransform>) => void;
+  /** Called whenever a reference prim's GLB/OBJ has finished loading (or has
+   *  been cleared because its source changed). `nodes` is empty when the
+   *  asset is being reset. */
+  onAssetMeshesLoaded: (primId: string, nodes: AssetMeshNode[]) => void;
+  /** Called with read-only pose data for the currently selected sub-mesh
+   *  (a node inside a loaded reference asset). Null when no sub-mesh is
+   *  selected — i.e. the selection is a top-level prim or nothing. */
+  onSubMeshInfoChange: (info: SubMeshInfo | null) => void;
+  /** When false, gizmo drags move/rotate/scale continuously instead of
+   *  snapping to the grid / 5° / 0.25 increments. */
+  snapEnabled: boolean;
+  /** Fired on right-click over a mesh; coords are page-space. Empty space
+   *  right-clicks are ignored (no menu shown). */
+  onContextMenu: (primId: string, x: number, y: number) => void;
 }
 
 // Translation snap = the grid's minor tick (FR-14.3 in the spec: 1 m).
@@ -76,12 +96,17 @@ export default function Viewport({
   prims,
   tool,
   selectedId,
+  selectedMeshUid,
   theme,
   focusSignal,
   onShapeDropped,
   onAssetDropped,
   onSelect,
-  onTransform
+  onTransform,
+  onAssetMeshesLoaded,
+  onSubMeshInfoChange,
+  snapEnabled,
+  onContextMenu
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -91,6 +116,12 @@ export default function Viewport({
   const gridMatRef = useRef<GridMaterial | null>(null);
   const meshesRef = useRef<Map<string, Mesh>>(new Map());
   const materialsRef = useRef<Map<string, StandardMaterial>>(new Map());
+  /** Sub-mesh registry: babylon uniqueId (stringified) -> Node, for every
+   *  node inside a loaded reference asset (TransformNodes for groups,
+   *  AbstractMeshes for leaves). Used to map clicks to a specific sub-mesh
+   *  and to outline a sub-mesh (or every descendant of an intermediate
+   *  group node) when selected. */
+  const subMeshRegistryRef = useRef<Map<string, Node>>(new Map());
   const gizmoMgrRef = useRef<GizmoManager | null>(null);
   const ensureSnapRef = useRef<() => void>(() => {});
   const lastPositionGizmoRef = useRef<IPositionGizmo | null>(null);
@@ -126,6 +157,19 @@ export default function Viewport({
   const onAssetDropRef = useRef(onAssetDropped);
   const onSelectRef = useRef(onSelect);
   const onTransformRef = useRef(onTransform);
+  const onAssetMeshesLoadedRef = useRef(onAssetMeshesLoaded);
+  const onSubMeshInfoChangeRef = useRef(onSubMeshInfoChange);
+  const onContextMenuRef = useRef(onContextMenu);
+  // Latest prim list captured so the canvas right-click handler can walk to
+  // the topmost ancestor of whatever was picked.
+  const primsRef = useRef<PrimNode[]>(prims);
+  // Snap toggle captured so the long-lived ensureSnapRef closure can read
+  // the current setting without being rebuilt on every flip.
+  const snapEnabledRef = useRef(snapEnabled);
+  // Latest selection captured so the focus / frame effect can read it
+  // without re-running every time the user clicks something new.
+  const selectedIdRef = useRef(selectedId);
+  const selectedMeshUidRef = useRef(selectedMeshUid);
   useEffect(() => {
     onDropRef.current = onShapeDropped;
   }, [onShapeDropped]);
@@ -138,6 +182,29 @@ export default function Viewport({
   useEffect(() => {
     onTransformRef.current = onTransform;
   }, [onTransform]);
+  useEffect(() => {
+    onAssetMeshesLoadedRef.current = onAssetMeshesLoaded;
+  }, [onAssetMeshesLoaded]);
+  useEffect(() => {
+    onSubMeshInfoChangeRef.current = onSubMeshInfoChange;
+  }, [onSubMeshInfoChange]);
+  useEffect(() => {
+    onContextMenuRef.current = onContextMenu;
+  }, [onContextMenu]);
+  useEffect(() => {
+    primsRef.current = prims;
+  }, [prims]);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useEffect(() => {
+    selectedMeshUidRef.current = selectedMeshUid;
+  }, [selectedMeshUid]);
+  // Re-apply snap distances to the live gizmos whenever the toggle flips.
+  useEffect(() => {
+    snapEnabledRef.current = snapEnabled;
+    ensureSnapRef.current();
+  }, [snapEnabled]);
 
   // One-time scene setup.
   useEffect(() => {
@@ -167,6 +234,11 @@ export default function Viewport({
     camera.upperRadiusLimit = 5000;
     camera.wheelDeltaPercentage = 0.02;
     camera.panningSensibility = 80;
+    // Tighter near/far than Babylon's defaults (0.1 / 10000) to keep the
+    // depth buffer precise at typical scene scales — fixes the major grid
+    // lines "jumping" when the camera moves close to the ground.
+    camera.minZ = 0.1;
+    camera.maxZ = 2000;
     // Allow orbiting under the floor.
     camera.lowerBetaLimit = -Math.PI;
     camera.upperBetaLimit = Math.PI;
@@ -195,7 +267,7 @@ export default function Viewport({
     key.intensity = 1.2;
     key.diffuse = new Color3(1, 0.98, 0.94);
 
-    const groundSize = 10000;
+    const groundSize = 1000;
     const ground = MeshBuilder.CreateGround(
       'ground',
       { width: groundSize, height: groundSize, subdivisions: 1 },
@@ -211,6 +283,10 @@ export default function Viewport({
     grid.lineColor = new Color3(0.6, 0.65, 0.75);
     grid.opacity = 0.25;
     grid.backFaceCulling = false;
+    // Logarithmic depth avoids z-fighting / "jumping" major grid lines as
+    // the camera moves around the origin. Without it, the depth precision
+    // near the ground plane is too coarse and lines snap between texels.
+    grid.useLogarithmicDepth = true;
     ground.material = grid;
     ground.alphaIndex = 0;
     gridMatRef.current = grid;
@@ -223,6 +299,9 @@ export default function Viewport({
     );
     xAxis.color = new Color3(0.85, 0.25, 0.25);
     xAxis.isPickable = false;
+    // Draw axis lines in a higher rendering group so they sit cleanly above
+    // the GridMaterial ground without depth-fighting.
+    xAxis.renderingGroupId = 1;
 
     const zAxis = MeshBuilder.CreateLines(
       'zAxis',
@@ -231,6 +310,7 @@ export default function Viewport({
     );
     zAxis.color = new Color3(0.3, 0.55, 0.95);
     zAxis.isPickable = false;
+    zAxis.renderingGroupId = 1;
 
     const yAxis = MeshBuilder.CreateLines(
       'yAxis',
@@ -239,6 +319,7 @@ export default function Viewport({
     );
     yAxis.color = new Color3(0.3, 0.85, 0.35);
     yAxis.isPickable = false;
+    yAxis.renderingGroupId = 1;
 
     // Selection is driven by us (click in viewport or in the hierarchy panel),
     // not by the gizmo manager's own pointer handling.
@@ -270,30 +351,37 @@ export default function Viewport({
     // Gizmos are lazily (re-)created when the manager enables them, so we
     // re-apply snap and hook the commit callback whenever a new gizmo instance shows up.
     ensureSnapRef.current = () => {
+      const snap = snapEnabledRef.current;
       const p = gizmoMgr.gizmos.positionGizmo;
-      if (p && p !== lastPositionGizmoRef.current) {
-        p.snapDistance = POSITION_SNAP;
-        p.onDragEndObservable.add(commitFromMesh);
-        lastPositionGizmoRef.current = p;
+      if (p) {
+        p.snapDistance = snap ? POSITION_SNAP : 0;
+        if (p !== lastPositionGizmoRef.current) {
+          p.onDragEndObservable.add(commitFromMesh);
+          lastPositionGizmoRef.current = p;
+        }
       }
       const r = gizmoMgr.gizmos.rotationGizmo;
-      if (r && r !== lastRotationGizmoRef.current) {
-        r.snapDistance = ROTATION_SNAP;
-        // Keep the rings on world axes. Babylon refuses to track an attached
-        // mesh's rotation when its scale is non-uniform and the drag stops
-        // responding; world-aligned rings sidestep that entirely.
-        r.updateGizmoRotationToMatchAttachedMesh = false;
-        r.onDragEndObservable.add(commitFromMesh);
-        lastRotationGizmoRef.current = r;
+      if (r) {
+        r.snapDistance = snap ? ROTATION_SNAP : 0;
+        if (r !== lastRotationGizmoRef.current) {
+          // Keep the rings on world axes. Babylon refuses to track an attached
+          // mesh's rotation when its scale is non-uniform and the drag stops
+          // responding; world-aligned rings sidestep that entirely.
+          r.updateGizmoRotationToMatchAttachedMesh = false;
+          r.onDragEndObservable.add(commitFromMesh);
+          lastRotationGizmoRef.current = r;
+        }
       }
       const s = gizmoMgr.gizmos.scaleGizmo;
-      if (s && s !== lastScaleGizmoRef.current) {
-        s.snapDistance = SCALE_SNAP;
-        // Make the drag-to-scale ratio track mouse travel ~1:1 instead of
-        // Babylon's default fractional response.
-        s.sensitivity = 4;
-        s.onDragEndObservable.add(commitFromMesh);
-        lastScaleGizmoRef.current = s;
+      if (s) {
+        s.snapDistance = snap ? SCALE_SNAP : 0;
+        if (s !== lastScaleGizmoRef.current) {
+          // Make the drag-to-scale ratio track mouse travel ~1:1 instead of
+          // Babylon's default fractional response.
+          s.sensitivity = 4;
+          s.onDragEndObservable.add(commitFromMesh);
+          lastScaleGizmoRef.current = s;
+        }
       }
       // Tint runs every time because gizmo subtrees lazily mount their handle
       // meshes; an early one-shot may run before the geometry exists.
@@ -439,7 +527,12 @@ export default function Viewport({
       }
       const id = (m?.metadata as { primId?: string } | undefined)?.primId;
       if (id) {
-        onSelectRef.current(id);
+        // If the picked mesh is a sub-mesh of a loaded reference asset, also
+        // surface its uid so the caller can highlight it specifically.
+        const uid = m ? String(m.uniqueId) : null;
+        const meshUid =
+          uid && subMeshRegistryRef.current.has(uid) ? uid : null;
+        onSelectRef.current(id, meshUid);
       }
       // Otherwise we probably tapped a gizmo handle; leave selection alone.
     });
@@ -511,9 +604,36 @@ export default function Viewport({
     canvas.addEventListener('dragover', onDragOver);
     canvas.addEventListener('drop', onDrop);
 
+    // Right-click: pick the topmost ancestor under the cursor and fire the
+    // context-menu callback. Always suppress the browser's default menu so
+    // empty-space right-clicks still don't pop a generic browser menu.
+    const onCanvasContextMenu = (ev: MouseEvent) => {
+      ev.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const pick = scene.pick(x, y);
+      if (!pick?.hit) return;
+      const picked = pick.pickedMesh;
+      if (!picked || picked === ground) return;
+      const primId = (picked.metadata as { primId?: string } | undefined)?.primId;
+      if (!primId) return;
+      const byId = new Map(primsRef.current.map((p) => [p.id, p] as const));
+      let cur = byId.get(primId);
+      if (!cur) return;
+      while (cur.parentId) {
+        const parent = byId.get(cur.parentId);
+        if (!parent) break;
+        cur = parent;
+      }
+      onContextMenuRef.current(cur.id, ev.clientX, ev.clientY);
+    };
+    canvas.addEventListener('contextmenu', onCanvasContextMenu);
+
     return () => {
       canvas.removeEventListener('dragover', onDragOver);
       canvas.removeEventListener('drop', onDrop);
+      canvas.removeEventListener('contextmenu', onCanvasContextMenu);
       window.removeEventListener('resize', onResize);
       meshesRef.current.clear();
       materialsRef.current.clear();
@@ -549,7 +669,12 @@ export default function Viewport({
       seen.add(prim.id);
       let mesh = existingMeshes.get(prim.id);
       if (!mesh) {
-        mesh = buildShapeMesh(prim, scene);
+        mesh = buildShapeMesh(
+          prim,
+          scene,
+          subMeshRegistryRef.current,
+          (nodes) => onAssetMeshesLoadedRef.current(prim.id, nodes)
+        );
         existingMeshes.set(prim.id, mesh);
       } else if (prim.kind === 'reference') {
         // Reload the GLB if the user edited the source path.
@@ -558,9 +683,18 @@ export default function Viewport({
           | undefined;
         if ((meta?.loadedSource ?? '') !== (prim.assetSource ?? '')) {
           for (const child of mesh.getChildMeshes(false)) child.dispose();
+          clearSubMeshRegistry(subMeshRegistryRef.current, prim.id);
+          onAssetMeshesLoadedRef.current(prim.id, []);
           mesh.metadata = { primId: prim.id };
           if (prim.assetSource) {
-            void loadGltfReference(mesh, prim.assetSource, scene, prim.id);
+            void loadGltfReference(
+              mesh,
+              prim.assetSource,
+              scene,
+              prim.id,
+              subMeshRegistryRef.current,
+              (nodes) => onAssetMeshesLoadedRef.current(prim.id, nodes)
+            );
           }
         }
       }
@@ -586,7 +720,9 @@ export default function Viewport({
         mat.specularColor = new Color3(0.15, 0.15, 0.15);
         existingMats.set(prim.id, mat);
       }
-      mat.diffuseColor = hexToColor3(prim.color);
+      const { color: rgb, alpha } = parseHexColor(prim.color);
+      mat.diffuseColor = rgb;
+      mat.alpha = alpha;
       // Reference prims carry their own PBR materials from the GLB; don't
       // overwrite them with our flat color.
       if (prim.kind !== 'reference') {
@@ -611,6 +747,8 @@ export default function Viewport({
     for (const [id, mesh] of existingMeshes) {
       if (seen.has(id)) continue;
       if (mgr?.attachedMesh === mesh) mgr.attachToMesh(null);
+      clearSubMeshRegistry(subMeshRegistryRef.current, id);
+      onAssetMeshesLoadedRef.current(id, []);
       mesh.dispose();
       existingMeshes.delete(id);
       const mat = existingMats.get(id);
@@ -626,30 +764,69 @@ export default function Viewport({
     const mgr = gizmoMgrRef.current;
     if (!mgr) return;
 
-    // Clear edges on every mesh.
+    // Clear edges on every mesh, including sub-meshes from loaded assets.
     for (const m of meshesRef.current.values()) {
       if (m.edgesRenderer) m.disableEdgesRendering();
     }
-
-    const selectedMesh = selectedId
-      ? meshesRef.current.get(selectedId) ?? null
-      : null;
-
-    if (selectedMesh) {
-      selectedMesh.enableEdgesRendering();
-      selectedMesh.edgesWidth = SELECTION_EDGE_WIDTH;
-      selectedMesh.edgesColor = SELECTION_COLOR;
+    for (const n of subMeshRegistryRef.current.values()) {
+      if (n instanceof AbstractMesh && n.edgesRenderer) {
+        n.disableEdgesRendering();
+      }
     }
 
-    const wantMove = tool === 'move' && !!selectedMesh;
-    const wantRotate = tool === 'rotate' && !!selectedMesh;
-    const wantScale = tool === 'scale' && !!selectedMesh;
+    const primMesh = selectedId
+      ? meshesRef.current.get(selectedId) ?? null
+      : null;
+    // Prefer the specific sub-mesh outline when one is selected; otherwise
+    // fall back to outlining the prim's root mesh.
+    const subNode =
+      selectedMeshUid != null
+        ? subMeshRegistryRef.current.get(selectedMeshUid) ?? null
+        : null;
+
+    const outlineOne = (m: AbstractMesh): void => {
+      if (m.getTotalVertices() === 0) return;
+      m.enableEdgesRendering();
+      m.edgesWidth = SELECTION_EDGE_WIDTH;
+      m.edgesColor = SELECTION_COLOR;
+    };
+
+    if (subNode) {
+      // The selected sub-node can be a leaf mesh *or* an intermediate group
+      // (e.g. `Object331` / `04 - HVP01` in OBJ assets, which load as a
+      // TransformNode with primitive child meshes). For groups, the node
+      // itself has no geometry, so outline every descendant mesh so the
+      // whole group lights up.
+      if (subNode instanceof AbstractMesh) outlineOne(subNode);
+      for (const d of subNode.getChildMeshes(false)) outlineOne(d);
+    } else if (primMesh) {
+      // Top-level prim selection: outline the prim's mesh and every
+      // descendant mesh. Asset groups carry no geometry of their own, so
+      // walking descendants is what actually lights up the asset.
+      outlineOne(primMesh);
+      for (const d of primMesh.getChildMeshes(false)) outlineOne(d);
+    }
+
+    // Surface the picked sub-mesh's local pose to the Properties panel.
+    // Only TransformNode (and its subclass AbstractMesh) carry position +
+    // rotation; other Node subtypes have no transform to report.
+    if (subNode && subNode instanceof TransformNode) {
+      onSubMeshInfoChangeRef.current(extractSubMeshInfo(selectedMeshUid!, subNode));
+    } else {
+      onSubMeshInfoChangeRef.current(null);
+    }
+
+    // Gizmos always attach to the prim's root mesh: sub-meshes inside a
+    // reference asset are owned by the asset and aren't independently movable.
+    const wantMove = tool === 'move' && !!primMesh;
+    const wantRotate = tool === 'rotate' && !!primMesh;
+    const wantScale = tool === 'scale' && !!primMesh;
     mgr.positionGizmoEnabled = wantMove;
     mgr.rotationGizmoEnabled = wantRotate;
     mgr.scaleGizmoEnabled = wantScale;
     ensureSnapRef.current();
-    mgr.attachToMesh(selectedMesh);
-  }, [selectedId, tool, prims]);
+    mgr.attachToMesh(primMesh);
+  }, [selectedId, selectedMeshUid, tool, prims]);
 
   // Measure tool side-effects: swap the canvas cursor for a crosshair and
   // clear any in-flight measurement when the user switches away.
@@ -666,12 +843,29 @@ export default function Viewport({
     applyCameraView(camera, cameraView);
   }, [cameraView]);
 
-  // Focus = reset camera to the same alpha/beta/radius/target the scene
-  // started with, and snap the view selector back to perspective.
+  // Focus = if a prim or sub-mesh is selected, frame it in the camera;
+  // otherwise reset camera to the same alpha/beta/radius/target the scene
+  // started with. Bumping the counter signals the Viewport to run; both the
+  // toolbar button and the 'F' hotkey go through this single channel.
   useEffect(() => {
     if (focusSignal === 0) return;
     const camera = cameraRef.current;
-    if (!camera) return;
+    const engine = engineRef.current;
+    if (!camera || !engine) return;
+    const sid = selectedIdRef.current;
+    const muid = selectedMeshUidRef.current;
+    // Prefer the specific sub-mesh when one is selected so framing zooms in
+    // on the picked piece instead of the whole asset.
+    let target: TransformNode | null = null;
+    if (muid) {
+      const n = subMeshRegistryRef.current.get(muid);
+      if (n instanceof TransformNode) target = n;
+    }
+    if (!target && sid) target = meshesRef.current.get(sid) ?? null;
+    if (target) {
+      frameMeshInCamera(camera, target, engine);
+      return;
+    }
     camera.mode = Camera.PERSPECTIVE_CAMERA;
     camera.alpha = Math.PI / 4;
     camera.beta = Math.PI / 3;
@@ -713,7 +907,12 @@ export default function Viewport({
   );
 }
 
-function buildShapeMesh(prim: PrimNode, scene: Scene): Mesh {
+function buildShapeMesh(
+  prim: PrimNode,
+  scene: Scene,
+  subMeshRegistry: Map<string, Node>,
+  onAssetMeshesLoaded: (nodes: AssetMeshNode[]) => void
+): Mesh {
   let mesh: Mesh;
   switch (prim.kind) {
     case 'box':
@@ -755,7 +954,14 @@ function buildShapeMesh(prim: PrimNode, scene: Scene): Mesh {
       mesh = new Mesh(prim.id, scene);
       mesh.isPickable = false;
       if (prim.assetSource) {
-        void loadGltfReference(mesh, prim.assetSource, scene, prim.id);
+        void loadGltfReference(
+          mesh,
+          prim.assetSource,
+          scene,
+          prim.id,
+          subMeshRegistry,
+          onAssetMeshesLoaded
+        );
       }
       break;
   }
@@ -766,22 +972,44 @@ function buildShapeMesh(prim: PrimNode, scene: Scene): Mesh {
   return mesh;
 }
 
-function hexToColor3(hex: string): Color3 {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
-  if (!m) return new Color3(0.7, 0.7, 0.72);
-  const v = parseInt(m[1], 16);
-  return new Color3(
-    ((v >> 16) & 0xff) / 255,
-    ((v >> 8) & 0xff) / 255,
-    (v & 0xff) / 255
-  );
+// Accepts `#rrggbb` or `#rrggbbaa`. Falls back to a neutral grey when the
+// string is malformed so a typo in a prim's color doesn't crash the scene.
+function parseHexColor(hex: string): { color: Color3; alpha: number } {
+  const m8 = /^#?([0-9a-fA-F]{8})$/.exec(hex);
+  if (m8) {
+    const v = parseInt(m8[1].slice(0, 6), 16);
+    const a = parseInt(m8[1].slice(6, 8), 16) / 255;
+    return {
+      color: new Color3(
+        ((v >> 16) & 0xff) / 255,
+        ((v >> 8) & 0xff) / 255,
+        (v & 0xff) / 255
+      ),
+      alpha: a
+    };
+  }
+  const m6 = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  if (m6) {
+    const v = parseInt(m6[1], 16);
+    return {
+      color: new Color3(
+        ((v >> 16) & 0xff) / 255,
+        ((v >> 8) & 0xff) / 255,
+        (v & 0xff) / 255
+      ),
+      alpha: 1
+    };
+  }
+  return { color: new Color3(0.7, 0.7, 0.72), alpha: 1 };
 }
 
 async function loadGltfReference(
   parent: Mesh,
   assetSource: string,
   scene: Scene,
-  primId: string
+  primId: string,
+  subMeshRegistry: Map<string, Node>,
+  onAssetMeshesLoaded: (nodes: AssetMeshNode[]) => void
 ): Promise<void> {
   const url = resolveAssetUrl(assetSource);
   // SceneLoader needs rootUrl + filename split so sibling files (e.g. an OBJ's
@@ -817,8 +1045,105 @@ async function loadGltfReference(
     }
     // Remember which source produced these children so a later edit triggers a reload.
     parent.metadata = { ...(parent.metadata ?? {}), primId, loadedSource: assetSource };
+    // Drop any stale sub-mesh registrations from a previous load of this prim,
+    // then walk the (potentially nested) loaded hierarchy under `parent` and
+    // publish it as an AssetMeshNode tree so the Hierarchy panel can render
+    // the asset's internal structure.
+    clearSubMeshRegistry(subMeshRegistry, primId);
+    const tree = buildAssetMeshTree(parent, primId, subMeshRegistry);
+    onAssetMeshesLoaded(tree);
   } catch (err) {
     console.error(`Failed to load reference ${assetSource}`, err);
+    onAssetMeshesLoaded([]);
+  }
+}
+
+// Babylon's glTF loader wraps imported scenes in an auto-generated
+// `__root__` transform node. Flatten that one level out so the hierarchy
+// panel shows the asset's real top-level nodes instead of a stub label.
+function buildAssetMeshTree(
+  parent: Node,
+  primId: string,
+  subMeshRegistry: Map<string, Node>
+): AssetMeshNode[] {
+  const nodes: AssetMeshNode[] = [];
+  for (const child of parent.getChildren()) {
+    if (isGltfRootStub(child)) {
+      nodes.push(...buildAssetMeshTree(child, primId, subMeshRegistry));
+    } else {
+      nodes.push(buildAssetMeshNode(child, primId, subMeshRegistry));
+    }
+  }
+  return nodes;
+}
+
+function buildAssetMeshNode(
+  node: Node,
+  primId: string,
+  subMeshRegistry: Map<string, Node>
+): AssetMeshNode {
+  const uid = String(node.uniqueId);
+  // Register every node (groups + leaves) so the selection effect can look
+  // up an intermediate TransformNode and walk its descendants. The primId
+  // tag on metadata is what `clearSubMeshRegistry` uses to evict entries on
+  // prim removal, so set it on every node; `assetMeshUid` is used by the
+  // picker which only picks meshes, so it's mesh-only.
+  subMeshRegistry.set(uid, node);
+  const meta = (node.metadata ?? {}) as { primId?: string; assetMeshUid?: string };
+  node.metadata =
+    node instanceof AbstractMesh
+      ? { ...meta, primId, assetMeshUid: uid }
+      : { ...meta, primId };
+  const children: AssetMeshNode[] = [];
+  for (const c of node.getChildren()) {
+    if (isGltfRootStub(c)) {
+      children.push(...buildAssetMeshTree(c, primId, subMeshRegistry));
+    } else {
+      children.push(buildAssetMeshNode(c, primId, subMeshRegistry));
+    }
+  }
+  return {
+    uid,
+    name: node.name || '(unnamed)',
+    children
+  };
+}
+
+function isGltfRootStub(node: Node): boolean {
+  return node.name === '__root__';
+}
+
+// Snapshot the local pose of an asset-internal node for display in the
+// Properties panel. Prefers Euler rotation; falls back to converting a
+// quaternion if the loader produced one (glTF nearly always does).
+function extractSubMeshInfo(uid: string, node: TransformNode): SubMeshInfo {
+  let rx = node.rotation.x;
+  let ry = node.rotation.y;
+  let rz = node.rotation.z;
+  if (node.rotationQuaternion) {
+    const e = node.rotationQuaternion.toEulerAngles();
+    rx = e.x;
+    ry = e.y;
+    rz = e.z;
+  }
+  return {
+    uid,
+    name: node.name || '(unnamed)',
+    position: [node.position.x, node.position.y, node.position.z],
+    rotation: [rx, ry, rz]
+  };
+}
+
+// Forget any sub-mesh uids previously registered for `primId`. Called when a
+// reference prim is removed or its assetSource changes (and we're about to
+// rebuild the registry from the new load).
+function clearSubMeshRegistry(
+  subMeshRegistry: Map<string, Node>,
+  primId: string
+): void {
+  for (const [uid, node] of subMeshRegistry) {
+    const meta = node.metadata as { primId?: string } | undefined;
+    if (meta?.primId === primId) subMeshRegistry.delete(uid);
   }
 }
 
@@ -935,4 +1260,33 @@ function applyCameraView(camera: ArcRotateCamera, view: CameraView): void {
   camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
   camera.alpha = a.alpha;
   camera.beta = a.beta;
+}
+
+// Frame `mesh` (and its descendants) in the ArcRotate camera by recentering
+// the target on the world AABB and choosing a radius that fits the largest
+// extent inside the current vertical+horizontal FOV. Leaves alpha/beta/mode
+// alone so the user keeps their orbit angle and ortho/perspective choice.
+function frameMeshInCamera(
+  camera: ArcRotateCamera,
+  mesh: TransformNode,
+  engine: Engine
+): void {
+  const { min, max } = mesh.getHierarchyBoundingVectors(true);
+  const center = Vector3.Center(min, max);
+  const size = max.subtract(min);
+  // Empty placeholder meshes (e.g. a reference whose GLB hasn't loaded yet)
+  // report a zero-extent box; fall back to a sane radius so we don't collapse
+  // the camera onto the target.
+  let maxDim = Math.max(size.x, size.y, size.z);
+  if (!isFinite(maxDim) || maxDim < 1e-4) maxDim = 1;
+  const aspect = engine.getAspectRatio(camera);
+  const vHalf = camera.fov / 2;
+  const hHalf = Math.atan(Math.tan(vHalf) * aspect);
+  const rV = (maxDim / 2) / Math.tan(vHalf);
+  const rH = (maxDim / 2) / Math.tan(hHalf);
+  // Padding factor: > 1 leaves breathing room around the framed mesh so the
+  // user sees a bit of surrounding context instead of a tight crop.
+  const radius = Math.max(rV, rH) * 2.0;
+  camera.target.copyFrom(center);
+  camera.radius = Math.max(camera.lowerRadiusLimit ?? 0.001, radius);
 }

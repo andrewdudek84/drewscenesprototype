@@ -65,7 +65,7 @@ function renderPrim(
   indent: string
 ): string {
   const name = sanitizeIdentifier(prim.name);
-  const colorRgb = hexToRgb(prim.color);
+  const { rgb: colorRgb, alpha } = parseHexColor(prim.color);
   const kids = childrenByParent.get(prim.id) ?? [];
   const inner = indent + '    ';
 
@@ -74,6 +74,10 @@ function renderPrim(
   lines.push(`${indent}    kind = "${prim.kind}"`);
   lines.push(`${indent})`);
   lines.push(`${indent}{`);
+  // Persist the runtime prim id so ontology bindings (which key on guid) can
+  // be reconnected on import — without this, parseUsda mints fresh ids and
+  // the saved SpatialItem.guid no longer resolves to anything.
+  lines.push(`${inner}custom string drewscenes:id = "${prim.id}"`);
   lines.push(
     `${inner}double3 xformOp:translate = ${vec3(prim.position)}`
   );
@@ -100,6 +104,11 @@ function renderPrim(
     lines.push(
       `${inner}    color3f[] primvars:displayColor = [${vec3(colorRgb)}]`
     );
+    if (alpha < 1) {
+      lines.push(
+        `${inner}    float[] primvars:displayOpacity = [${fmt(alpha)}]`
+      );
+    }
     lines.push(`${inner}}`);
   }
 
@@ -130,15 +139,35 @@ function eulerDeg(rad: Vec3): Vec3 {
   ];
 }
 
-function hexToRgb(hex: string): Vec3 {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
-  if (!m) return [0.7, 0.7, 0.7];
-  const v = parseInt(m[1], 16);
-  return [
-    ((v >> 16) & 0xff) / 255,
-    ((v >> 8) & 0xff) / 255,
-    (v & 0xff) / 255
-  ];
+// Splits a `#rrggbb` or `#rrggbbaa` hex string into its rgb float triple and
+// alpha (0..1). Used by export (to emit displayOpacity) and the import path
+// helper that re-encodes the 8-digit hex.
+function parseHexColor(hex: string): { rgb: Vec3; alpha: number } {
+  const m8 = /^#?([0-9a-fA-F]{8})$/.exec(hex);
+  if (m8) {
+    const v = parseInt(m8[1].slice(0, 6), 16);
+    return {
+      rgb: [
+        ((v >> 16) & 0xff) / 255,
+        ((v >> 8) & 0xff) / 255,
+        (v & 0xff) / 255
+      ],
+      alpha: parseInt(m8[1].slice(6, 8), 16) / 255
+    };
+  }
+  const m6 = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  if (m6) {
+    const v = parseInt(m6[1], 16);
+    return {
+      rgb: [
+        ((v >> 16) & 0xff) / 255,
+        ((v >> 8) & 0xff) / 255,
+        (v & 0xff) / 255
+      ],
+      alpha: 1
+    };
+  }
+  return { rgb: [0.7, 0.7, 0.7], alpha: 1 };
 }
 
 function rgbToHex(rgb: Vec3): string {
@@ -222,6 +251,7 @@ function walk(node: ParsedNode, parentId: string | null, out: PrimNode[]): void 
   // Find a child geom def to determine kind + color.
   let kind: ShapeKind | null = null;
   let color = '#b3b3b8';
+  let alpha = 1;
   const xformChildren: ParsedNode[] = [];
   for (const c of node.children) {
     if (c.isXform) {
@@ -236,7 +266,19 @@ function walk(node: ParsedNode, parentId: string | null, out: PrimNode[]): void 
         const rgb = parseVecList(dc);
         if (rgb) color = rgbToHex(rgb);
       }
+      const op = c.attrs.get('primvars:displayOpacity');
+      if (op) {
+        const a = parseFirstNumber(op);
+        if (a !== null) alpha = Math.max(0, Math.min(1, a));
+      }
     }
+  }
+  // Pack the (possibly translucent) alpha back into the color string so the
+  // material picker / Babylon material both see it. Only when < 1 to keep
+  // opaque prims as plain 6-digit hex.
+  if (alpha < 1) {
+    const aa = Math.round(alpha * 255).toString(16).padStart(2, '0');
+    color = `${color}${aa}`;
   }
   // Prefer explicit `kind = "<shapekind>"` metadata when present (we write it).
   const meta = node.attrs.get('__kindMeta');
@@ -262,7 +304,10 @@ function walk(node: ParsedNode, parentId: string | null, out: PrimNode[]): void 
     (rotDeg[2] * Math.PI) / 180
   ];
 
-  const id = newId();
+  // Prefer the persisted `drewscenes:id` (written by exportToUsda) so prim
+  // ids round-trip and ontology bindings can reattach by guid.
+  const persistedId = (node.attrs.get('drewscenes:id') ?? '').replace(/^"|"$/g, '');
+  const id = persistedId || newId();
   out.push({
     id,
     name: node.name,
@@ -290,6 +335,13 @@ function parseVec(v: string | undefined): Vec3 | null {
 function parseVecList(v: string): Vec3 | null {
   // Accepts "[(r, g, b)]" or "(r, g, b)".
   return parseVec(v);
+}
+
+function parseFirstNumber(v: string): number | null {
+  const m = v.match(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ---------- Tokenizer / def parser ----------

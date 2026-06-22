@@ -9,7 +9,7 @@
 # the OBJ are loaded automatically by Babylon's OBJ loader.
 def Xform "HospitalBed"
 {
-    def Xform "Body" (
+    def Xform "Asset" (
         kind = "reference"
     )
     {

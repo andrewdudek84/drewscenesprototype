@@ -6,7 +6,6 @@ export interface ShapeDef {
 }
 
 export const SHAPE_CATALOG: ShapeDef[] = [
-  { kind: 'group', label: 'Group' },
   { kind: 'box', label: 'Box' },
   { kind: 'cylinder', label: 'Cylinder' },
   { kind: 'sphere', label: 'Sphere' },

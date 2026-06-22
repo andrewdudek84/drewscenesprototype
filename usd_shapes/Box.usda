@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    defaultPrim = "Box"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Unit cube primitive used as a generic placeholder shape. Drag-bound to
+# ontology SpatialItems the same way `usd_assets/*` wrappers are.
+def Xform "Box"
+{
+    def Cube "Geom" (
+        kind = "reference"
+    )
+    {
+        double size = 1
+    }
+}

@@ -1,0 +1,16 @@
+#usda 1.0
+(
+    defaultPrim = "Sphere"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Sphere"
+{
+    def Sphere "Geom" (
+        kind = "reference"
+    )
+    {
+        double radius = 0.5
+    }
+}

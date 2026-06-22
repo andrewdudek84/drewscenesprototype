@@ -17,6 +17,11 @@ const ALLOWLIST = (typeof __DIST_ASSET_ALLOWLIST__ !== 'undefined'
   ? __DIST_ASSET_ALLOWLIST__
   : []) as string[];
 
+// Curated set of asset ids actually exposed in the deployment palette. The
+// `Blank` placeholder is rendered separately by AssetsPalette and is not
+// part of this list.
+const DEPLOYABLE_ASSET_IDS = new Set(['HospitalBed', 'Room']);
+
 export interface AssetDef {
   id: string;
   label: string;
@@ -25,9 +30,10 @@ export interface AssetDef {
 
 const LABEL_OVERRIDES: Record<string, string> = {
   stairs: 'Stairs',
-  Forklift: 'Forklift',
   shelves_01: 'Shelves',
-  HospitalBed: 'Hospital Bed'
+  HospitalBed: 'Hospital Bed',
+  Room: 'Room',
+  UR10: 'UR10'
 };
 
 export const ASSET_LIBRARY: AssetDef[] = Object.entries(assetModules)
@@ -37,6 +43,7 @@ export const ASSET_LIBRARY: AssetDef[] = Object.entries(assetModules)
     const label = LABEL_OVERRIDES[id] ?? titleCase(id);
     return { id, label, usda };
   })
+  .filter((a) => DEPLOYABLE_ASSET_IDS.has(a.id))
   .filter((a) => ALLOWLIST.length === 0 || ALLOWLIST.includes(a.id))
   .sort((a, b) => a.label.localeCompare(b.label));
 

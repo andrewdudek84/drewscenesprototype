@@ -8,7 +8,7 @@
 # Shelving unit geometry + textures live in a sibling GLB.
 def Xform "Shelves"
 {
-    def Xform "Body" (
+    def Xform "Asset" (
         kind = "reference"
     )
     {

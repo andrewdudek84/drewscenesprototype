@@ -27,6 +27,12 @@ export interface PrimNode {
   /** CSS-style hex color, e.g. "#b3b3b8". */
   /** For `kind === 'reference'`: USDA asset path (e.g. "./Forklift/Forklift.glb"). */
   assetSource?: string;
+  /** For `kind === 'group'` spawned from the asset library: the library id
+   *  (e.g. "HospitalBed"). Lets the UI map the group back to its source
+   *  `/usd_assets/<id>.usda` wrapper — used by the ontology drop binding. */
+  assetId?: string;
+  /** User-authored extra key/value properties shown in the Properties panel. */
+  customProps?: Record<string, string>;
   color: string;
 }
 
@@ -37,5 +43,37 @@ export interface PrimTransform {
 }
 
 export type PrimPatch = Partial<
-  Pick<PrimNode, 'name' | 'position' | 'rotation' | 'scale' | 'color' | 'parentId' | 'assetSource'>
+  Pick<
+    PrimNode,
+    'name' | 'position' | 'rotation' | 'scale' | 'color' | 'parentId' | 'assetSource' | 'customProps'
+  >
 >;
+
+/**
+ * Read-only descriptor for one node/mesh inside a loaded reference asset
+ * (GLB/OBJ). Lets the Hierarchy panel display the asset's internal structure
+ * and let the user select individual sub-meshes in the viewport.
+ *
+ * `uid` is stable for the lifetime of the loaded asset instance and matches
+ * the picked Babylon mesh, so it's safe to use as the selection key.
+ */
+export interface AssetMeshNode {
+  uid: string;
+  name: string;
+  children: AssetMeshNode[];
+}
+
+/**
+ * Live pose data for a selected sub-mesh inside a loaded reference asset.
+ * Read-only in the UI (the gizmo always drives the parent prim, not an
+ * asset-internal node), but lets the Properties panel display the picked
+ * node's name and local transform.
+ *
+ * Rotation values are Euler angles in radians, matching `PrimNode.rotation`.
+ */
+export interface SubMeshInfo {
+  uid: string;
+  name: string;
+  position: Vec3;
+  rotation: Vec3;
+}

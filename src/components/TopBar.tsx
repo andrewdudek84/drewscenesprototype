@@ -69,17 +69,12 @@ export default function TopBar({
   const onPickFile: React.ChangeEventHandler<HTMLInputElement> = (e) => {
     const f = e.target.files?.[0];
     if (f) onImport(f);
-    // Reset so the same file can be re-imported later.
     e.target.value = '';
   };
 
   return (
     <header className="topbar">
       <div className="topbar-left">
-        <Logo />
-        <span className="brand-name">Drew Scenes Prototype V1.0</span>
-      </div>
-      <div className="topbar-center">
         {editing ? (
           <input
             ref={inputRef}
@@ -100,6 +95,7 @@ export default function TopBar({
             title="Click to rename scene"
             onClick={() => setEditing(true)}
           >
+            <span className="scene-title-prefix">Editing scene:&nbsp;</span>
             <span className="scene-title-text">{sceneName}</span>
             <PencilIcon />
           </button>
@@ -109,7 +105,7 @@ export default function TopBar({
         <input
           ref={fileRef}
           type="file"
-          accept=".usda,.usd,text/plain"
+          accept=".json,.usda,.usd,application/json,text/plain"
           style={{ display: 'none' }}
           onChange={onPickFile}
         />
@@ -117,19 +113,19 @@ export default function TopBar({
           type="button"
           className="topbar-btn"
           onClick={() => fileRef.current?.click()}
-          title="Import scene from .usda file"
+          title="Load a scene from a combined .json file (or legacy .usda)"
         >
-          <ImportIcon />
-          <span>Import</span>
+          <LoadIcon />
+          <span>Load</span>
         </button>
         <button
           type="button"
           className="topbar-btn is-primary"
           onClick={onExport}
-          title="Export scene as .usda file"
+          title="Save scene + ontology as a combined .json file"
         >
-          <ExportIcon />
-          <span>Export</span>
+          <SaveIcon />
+          <span>Save</span>
         </button>
         <div className="topbar-menu" ref={menuRef}>
           <button
@@ -181,68 +177,6 @@ export default function TopBar({
   );
 }
 
-function Logo() {
-  // Cat face: rounded head with triangular ears, whisker pads, a small
-  // triangular nose, and vertical slit pupils on green eyes.
-  return (
-    <svg
-      viewBox="0 0 32 32"
-      width="26"
-      height="26"
-      aria-hidden="true"
-      className="brand-logo"
-    >
-      <defs>
-        <linearGradient id="catFur" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#6e7a8a" />
-          <stop offset="1" stopColor="#3a4250" />
-        </linearGradient>
-      </defs>
-
-      {/* Ears: triangular with pink inner ear. */}
-      <path d="M5 12 L8 3 L13 10 Z" fill="url(#catFur)" stroke="#22272f" strokeWidth="0.6" strokeLinejoin="round" />
-      <path d="M27 12 L24 3 L19 10 Z" fill="url(#catFur)" stroke="#22272f" strokeWidth="0.6" strokeLinejoin="round" />
-      <path d="M7.5 10 L8.5 5.5 L11 9 Z" fill="#e58aa6" />
-      <path d="M24.5 10 L23.5 5.5 L21 9 Z" fill="#e58aa6" />
-
-      {/* Head: rounded with a slight chin taper. */}
-      <path
-        d="M16 7
-           C 22 7, 26 11, 26 17
-           C 26 21, 24 24, 21 26
-           C 19.5 27, 17.5 27.5, 16 27.5
-           C 14.5 27.5, 12.5 27, 11 26
-           C 8 24, 6 21, 6 17
-           C 6 11, 10 7, 16 7 Z"
-        fill="url(#catFur)"
-        stroke="#22272f"
-        strokeWidth="0.7"
-        strokeLinejoin="round"
-      />
-
-      {/* Eyes: green almond with vertical slit pupils + small highlight. */}
-      <path d="M9.5 16 C 10.5 14, 13.5 14, 14.5 16 C 13.5 18, 10.5 18, 9.5 16 Z" fill="#a8e063" />
-      <path d="M17.5 16 C 18.5 14, 21.5 14, 22.5 16 C 21.5 18, 18.5 18, 17.5 16 Z" fill="#a8e063" />
-      <ellipse cx="12" cy="16" rx="0.55" ry="1.7" fill="#0a0907" />
-      <ellipse cx="20" cy="16" rx="0.55" ry="1.7" fill="#0a0907" />
-      <circle cx="11.6" cy="15.4" r="0.3" fill="#f6f5f1" />
-      <circle cx="19.6" cy="15.4" r="0.3" fill="#f6f5f1" />
-
-      {/* Nose: small pink triangle. */}
-      <path d="M15 19.5 L17 19.5 L16 21 Z" fill="#e58aa6" stroke="#a85f78" strokeWidth="0.3" strokeLinejoin="round" />
-
-      {/* Mouth: classic cat "ω" with a dip under the nose. */}
-      <path d="M16 21 L16 22.3" stroke="#0a0907" strokeWidth="0.6" strokeLinecap="round" />
-      <path d="M16 22.3 Q 14.5 23.6, 13.5 22.6" fill="none" stroke="#0a0907" strokeWidth="0.6" strokeLinecap="round" />
-      <path d="M16 22.3 Q 17.5 23.6, 18.5 22.6" fill="none" stroke="#0a0907" strokeWidth="0.6" strokeLinecap="round" />
-
-      {/* Whiskers. */}
-      <path d="M6 20 L13 20.5 M6.3 22 L13 21.5" stroke="#e7ecf3" strokeWidth="0.4" strokeLinecap="round" />
-      <path d="M26 20 L19 20.5 M25.7 22 L19 21.5" stroke="#e7ecf3" strokeWidth="0.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function PencilIcon() {
   return (
     <svg
@@ -261,7 +195,7 @@ function PencilIcon() {
   );
 }
 
-function ImportIcon() {
+function SaveIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -273,14 +207,17 @@ function ImportIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M12 4 L12 15" />
-      <path d="M7 11 L12 16 L17 11" />
-      <path d="M5 20 L19 20" />
+      {/* Floppy-disk outline with notched top-right corner. */}
+      <path d="M5 4 H16 L20 8 V19 A1 1 0 0 1 19 20 H5 A1 1 0 0 1 4 19 V5 A1 1 0 0 1 5 4 Z" />
+      {/* Top label slot. */}
+      <path d="M8 4 V9 H15 V4" />
+      {/* Bottom write-protect/label rectangle. */}
+      <path d="M7 13 H17 V20 H7 Z" />
     </svg>
   );
 }
 
-function ExportIcon() {
+function LoadIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -292,9 +229,9 @@ function ExportIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M12 16 L12 5" />
-      <path d="M7 9 L12 4 L17 9" />
-      <path d="M5 20 L19 20" />
+      {/* Open folder: back panel with tab, slanted front flap. */}
+      <path d="M3 7 A1 1 0 0 1 4 6 H9 L11 8 H19 A1 1 0 0 1 20 9 V10" />
+      <path d="M3 10 H21 L18.5 19 A1 1 0 0 1 17.5 20 H4.5 A1 1 0 0 1 3.5 19 Z" />
     </svg>
   );
 }
