@@ -117,13 +117,13 @@ export default function HierarchyPanel({
   return (
     <aside className={`panel hierarchy${isOpen ? ' is-open' : ''}`}>
       <header className="panel-header">
-        <span>Scene</span>
+        <span>Viewport</span>
         <button
           type="button"
           className="panel-header-close"
           onClick={onClose}
-          title="Close scene panel"
-          aria-label="Close scene panel"
+          title="Close viewport panel"
+          aria-label="Close viewport panel"
         >
           ×
         </button>

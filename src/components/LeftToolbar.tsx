@@ -205,8 +205,8 @@ export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, 
       <button
         type="button"
         className={`tool-btn${sceneOpen ? ' is-active' : ''}`}
-        title={sceneOpen ? 'Hide scene panel' : 'Show scene panel'}
-        aria-label={sceneOpen ? 'Hide scene panel' : 'Show scene panel'}
+        title={sceneOpen ? 'Hide viewport panel' : 'Show viewport panel'}
+        aria-label={sceneOpen ? 'Hide viewport panel' : 'Show viewport panel'}
         aria-pressed={sceneOpen}
         onClick={onToggleScene}
       >
