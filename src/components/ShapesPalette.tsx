@@ -1,5 +1,6 @@
-import { SHAPE_CATALOG, SHAPE_DRAG_MIME } from '../shapes';
+import { ASSET_DRAG_MIME, SHAPE_CATALOG, SHAPE_DRAG_MIME } from '../shapes';
 import type { ShapeKind } from '../types';
+import PaletteImporter from './PaletteImporter';
 
 export default function ShapesPalette() {
   const onDragStart = (e: React.DragEvent<HTMLDivElement>, kind: ShapeKind) => {
@@ -10,6 +11,11 @@ export default function ShapesPalette() {
 
   return (
     <div className="palette-items">
+      <PaletteImporter
+        palette="shape"
+        dragMime={ASSET_DRAG_MIME}
+        importTitle="Import a .usd / .usda shape from your computer"
+      />
       {SHAPE_CATALOG.map((s) => (
         <div
           key={s.kind}

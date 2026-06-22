@@ -3,6 +3,8 @@
 // are served verbatim from /usd_assets/ by a small Vite plugin so that relative
 // references (e.g. an MTL's `map_Kd textures/foo.png`) resolve naturally.
 
+import { getUserLibraryItem, resolveUserAssetUrl } from './userLibrary';
+
 const assetModules = import.meta.glob('../usd_assets/*.usda', {
   query: '?raw',
   import: 'default',
@@ -48,15 +50,25 @@ export const ASSET_LIBRARY: AssetDef[] = Object.entries(assetModules)
   .sort((a, b) => a.label.localeCompare(b.label));
 
 export function getAsset(id: string): AssetDef | undefined {
-  return ASSET_LIBRARY.find((a) => a.id === id);
+  const builtin = ASSET_LIBRARY.find((a) => a.id === id);
+  if (builtin) return builtin;
+  const user = getUserLibraryItem(id);
+  if (user) return { id: user.id, label: user.label, usda: user.usda };
+  return undefined;
 }
 
 /**
  * Resolve a USDA asset path (the contents of `@...@`) to a URL the browser
  * can fetch. Accepts paths like "./Forklift/Forklift.glb" or
  * "HospitalBed/Hospital_Bed.obj"; returns a stable `/usd_assets/...` URL.
+ * Paths starting with `user://` are resolved against the in-memory user
+ * library blob registry (object URLs created from IndexedDB-backed Blobs).
  */
 export function resolveAssetUrl(assetPath: string): string {
+  if (assetPath.startsWith('user://')) {
+    const url = resolveUserAssetUrl(assetPath);
+    if (url) return url;
+  }
   const cleaned = assetPath.replace(/^\.\//, '').replace(/^\/+/, '');
   return `/usd_assets/${cleaned}`;
 }

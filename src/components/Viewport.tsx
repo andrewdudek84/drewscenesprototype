@@ -1017,8 +1017,20 @@ async function loadGltfReference(
   const lastSlash = url.lastIndexOf('/');
   const rootUrl = url.slice(0, lastSlash + 1);
   const fileName = url.slice(lastSlash + 1);
+  // Resolved `user://` URLs become `blob:` URLs with no extension, so
+  // Babylon can't auto-pick a loader. Pull the original extension off the
+  // `assetSource` (e.g. ".glb") and pass it as pluginExtension.
+  const sourceExt = assetSource.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase();
+  const pluginExtension = url.startsWith('blob:') ? sourceExt : undefined;
   try {
-    const result = await SceneLoader.ImportMeshAsync('', rootUrl, fileName, scene);
+    const result = await SceneLoader.ImportMeshAsync(
+      '',
+      rootUrl,
+      fileName,
+      scene,
+      null,
+      pluginExtension
+    );
     // The reference prim may have been removed before the load finished.
     if (parent.isDisposed()) {
       for (const m of result.meshes) m.dispose();

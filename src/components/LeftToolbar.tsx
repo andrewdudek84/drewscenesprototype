@@ -7,6 +7,8 @@ interface Props {
   onFocus: () => void;
   snapEnabled: boolean;
   onSnapToggle: () => void;
+  sceneOpen: boolean;
+  onToggleScene: () => void;
 }
 
 const TOOLS: { id: ToolMode; label: string; icon: JSX.Element }[] = [
@@ -93,7 +95,7 @@ const TOOLS: { id: ToolMode; label: string; icon: JSX.Element }[] = [
   }
 ];
 
-export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, onSnapToggle }: Props) {
+export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, onSnapToggle, sceneOpen, onToggleScene }: Props) {
   return (
     <aside className="panel toolbar">
       {TOOLS.map((t) => (
@@ -198,6 +200,32 @@ export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, 
           <line x1="12" y1="18" x2="12" y2="21.5" />
           <line x1="2.5" y1="12" x2="6" y2="12" />
           <line x1="18" y1="12" x2="21.5" y2="12" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className={`tool-btn${sceneOpen ? ' is-active' : ''}`}
+        title={sceneOpen ? 'Hide scene panel' : 'Show scene panel'}
+        aria-label={sceneOpen ? 'Hide scene panel' : 'Show scene panel'}
+        aria-pressed={sceneOpen}
+        onClick={onToggleScene}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="20"
+          height="20"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {/* Perspective grid: ground plane receding to a vanishing point. */}
+          <path d="M3 20 L21 20 L17 7 L7 7 Z" />
+          <path d="M9 20 L11 7" />
+          <path d="M15 20 L13 7" />
+          <path d="M5 15 L19 15" />
+          <path d="M6.5 11 L17.5 11" />
         </svg>
       </button>
     </aside>

@@ -89,7 +89,21 @@ canvas {
 }
 
 .panel.hierarchy {
-  grid-area: hierarchy;
+  position: fixed;
+  top: var(--topbar-h);
+  right: 0;
+  bottom: 0;
+  width: var(--hierarchy-w);
+  max-width: 90vw;
+  z-index: 10;
+  transform: translateX(100%);
+  transition: transform 200ms ease;
+  border-left: 1px solid var(--panel-border);
+  border-top: none;
+}
+
+.panel.hierarchy.is-open {
+  transform: translateX(0);
 }
 
 .panel.ontology {
@@ -135,7 +149,8 @@ canvas {
   width: var(--properties-w);
   max-height: calc(100vh - var(--topbar-h) - var(--palette-h) - 24px);
   z-index: 5;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  border-right: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
   border-radius: 6px;
   overflow: hidden;
   display: flex;
@@ -375,6 +390,29 @@ canvas {
 
 .panel.hierarchy {
   border-top: none;
+}
+
+.panel.hierarchy .panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-header-close {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.panel-header-close:hover {
+  background: var(--hover-bg);
+  color: var(--text);
 }
 
 .panel.ontology {
@@ -1073,6 +1111,71 @@ html[data-theme='light'] .panel.toolbar {
   transform: scale(0.98);
 }
 
+.palette-item.is-user {
+  position: relative;
+  border-style: dashed;
+}
+
+.palette-item-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.palette-item.is-user:hover .palette-item-remove {
+  opacity: 1;
+}
+
+.palette-item-remove:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.palette-import-tile {
+  font: inherit;
+  box-sizing: content-box;
+  margin: 0;
+  color: var(--text);
+  background: #cfe4f7;
+  border-style: dashed;
+  border-color: #7aaedd;
+  cursor: pointer;
+}
+
+.palette-import-tile:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: #b8d6f0;
+}
+
+.palette-import-tile:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.palette-import-glyph {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 300;
+  line-height: 1;
+  color: #2a6ea8;
+}
+
 .palette-label {
   font-size: 12px;
   color: var(--text);
@@ -1192,6 +1295,37 @@ html[data-theme='light'] .panel.toolbar {
   background: var(--input-bg-readonly);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
+}
+
+.props-custom-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.props-custom-title {
+  font-weight: 600;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+
+.props-custom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.props-custom-row > .props-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.props-custom-row > .model-rel-btn {
+  flex: 0 0 auto;
 }
 
 .usd-drop {

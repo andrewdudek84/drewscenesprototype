@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Matrix, Quaternion, Vector3 } from '@babylonjs/core';
+import { Matrix } from '@babylonjs/core';
 import BottomPanel from './components/BottomPanel';
 import ContextMenu, {
   type ContextMenuItem
@@ -42,6 +42,22 @@ import {
   type SpatialBinding
 } from './ontology';
 import { exportToUsda, parseUsda } from './usd';
+import {
+  KIND_LABELS,
+  SPAWN_HALF_HEIGHT,
+  DEFAULT_COLOR,
+  SHAPE_USDA
+} from './sceneConstants';
+import {
+  decomposeMatrix,
+  fileSafe,
+  getWorldMatrix,
+  invertMatrix,
+  isDescendant,
+  newId,
+  nextDuplicateName,
+  randomSceneName
+} from './sceneUtils';
 import type {
   AssetMeshNode,
   PrimNode,
@@ -52,44 +68,6 @@ import type {
   ToolMode,
   Vec3
 } from './types';
-
-const KIND_LABELS: Record<ShapeKind, string> = {
-  box: 'Box',
-  cylinder: 'Cylinder',
-  sphere: 'Sphere',
-  plane: 'Plane',
-  cone: 'Cone',
-  // 'group' prims are surfaced as "Asset" containers in the UI (the
-  // underlying ShapeKind string stays 'group' so USDA export/import is
-  // unaffected).
-  group: 'Asset',
-  reference: 'Reference'
-};
-
-// Default half-height to lift the spawned mesh so it rests on the ground.
-const SPAWN_HALF_HEIGHT: Record<ShapeKind, number> = {
-  box: 0.5,
-  cylinder: 0.5,
-  sphere: 0.5,
-  plane: 0.001,
-  cone: 0.5,
-  group: 0,
-  // Reference prims carry their own pivot inside the GLB; don't add a lift.
-  reference: 0
-};
-
-const DEFAULT_COLOR = '#b3b3b8';
-
-// Maps primitive shape kinds to the matching `usd_shapes/<Name>.usda` wrapper
-// so a plain Box / Cylinder / etc. can be drag-bound to an ontology
-// SpatialItem the same way library Assets are.
-const SHAPE_USDA: Partial<Record<ShapeKind, string>> = {
-  box: 'Box',
-  cylinder: 'Cylinder',
-  sphere: 'Sphere',
-  cone: 'Cone',
-  plane: 'Plane'
-};
 
 export default function App() {
   const [inspectorSelection, setInspectorSelection] = useState<
@@ -127,6 +105,9 @@ export default function App() {
         : null;
     return saved === 'dark' ? 'dark' : 'light';
   });
+  // Scene (formerly Hierarchy) slide-out is hidden by default and toggled
+  // from the topbar.
+  const [sceneOpen, setSceneOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1450,23 +1431,25 @@ export default function App() {
           onFocus={handleFocus}
           snapEnabled={snapEnabled}
           onSnapToggle={() => setSnapEnabled((v) => !v)}
+          sceneOpen={sceneOpen}
+          onToggleScene={() => setSceneOpen((v) => !v)}
         />
       </main>
-      {false && (
-        <HierarchyPanel
-          prims={prims}
-          selectedId={selectedId}
-          selectedMeshUid={selectedMeshUid}
-          assetMeshes={assetMeshes}
-          mappedByPrimId={mappedByPrimId}
-          onSelect={handleSelect}
-          onReparent={handleReparent}
-          onShapeAdd={handleShapeAddToParent}
-          onAssetAdd={handleAssetAddToParent}
-          onDelete={handleDelete}
-          onContextMenu={handleContextMenu}
-        />
-      )}
+      <HierarchyPanel
+        prims={prims}
+        selectedId={selectedId}
+        selectedMeshUid={selectedMeshUid}
+        assetMeshes={assetMeshes}
+        mappedByPrimId={mappedByPrimId}
+        onSelect={handleSelect}
+        onReparent={handleReparent}
+        onShapeAdd={handleShapeAddToParent}
+        onAssetAdd={handleAssetAddToParent}
+        onDelete={handleDelete}
+        onContextMenu={handleContextMenu}
+        isOpen={sceneOpen}
+        onClose={() => setSceneOpen(false)}
+      />
       <PropertiesPanel
         prim={selectedPrim}
         subMesh={subMeshInfo}
@@ -1538,137 +1521,4 @@ export default function App() {
       )}
     </div>
   );
-}
-
-function fileSafe(s: string): string {
-  return s.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'scene';
-}
-
-// Generate a friendly default scene name: "<Adjective> <Animal>".
-const SCENE_NAME_ADJECTIVES = [
-  'Brave', 'Bright', 'Calm', 'Cheerful', 'Clever', 'Cosmic', 'Curious',
-  'Daring', 'Eager', 'Electric', 'Fancy', 'Fearless', 'Fierce', 'Frosty',
-  'Gentle', 'Glowing', 'Golden', 'Happy', 'Jolly', 'Lively', 'Lucky',
-  'Mighty', 'Mystic', 'Noble', 'Plucky', 'Quiet', 'Quirky', 'Radiant',
-  'Rapid', 'Rustic', 'Shimmering', 'Silent', 'Silly', 'Sleepy', 'Sly',
-  'Snazzy', 'Sparkling', 'Speedy', 'Spry', 'Sturdy', 'Sunny', 'Swift',
-  'Tame', 'Tiny', 'Vivid', 'Wandering', 'Wild', 'Wise', 'Zany', 'Zesty'
-];
-const SCENE_NAME_ANIMALS = [
-  'Antelope', 'Badger', 'Bear', 'Beaver', 'Bison', 'Buffalo', 'Camel',
-  'Caribou', 'Cheetah', 'Coyote', 'Crane', 'Dolphin', 'Eagle', 'Elephant',
-  'Elk', 'Falcon', 'Ferret', 'Finch', 'Fox', 'Gazelle', 'Gecko', 'Giraffe',
-  'Goose', 'Hare', 'Hawk', 'Heron', 'Hippo', 'Horse', 'Hyena', 'Ibis',
-  'Iguana', 'Jaguar', 'Koala', 'Lemur', 'Leopard', 'Lion', 'Lynx', 'Mongoose',
-  'Moose', 'Narwhal', 'Ocelot', 'Octopus', 'Orca', 'Otter', 'Owl', 'Panda',
-  'Panther', 'Penguin', 'Platypus', 'Puffin', 'Quokka', 'Rabbit', 'Raccoon',
-  'Raven', 'Reindeer', 'Rhino', 'Salamander', 'Seal', 'Shark', 'Sloth',
-  'Squirrel', 'Stingray', 'Stork', 'Swan', 'Tapir', 'Tiger', 'Toucan',
-  'Turtle', 'Walrus', 'Weasel', 'Whale', 'Wolf', 'Wolverine', 'Wombat',
-  'Yak', 'Zebra'
-];
-const SCENE_NAME_NOUNS = [
-  'Scene', 'Setting', 'Stage', 'Locale', 'Vista', 'View', 'Tableau',
-  'Backdrop', 'Landscape', 'Panorama', 'Scenery', 'Spot', 'Venue', 'Place'
-];
-function randomSceneName(): string {
-  const adj = SCENE_NAME_ADJECTIVES[Math.floor(Math.random() * SCENE_NAME_ADJECTIVES.length)];
-  const animal = SCENE_NAME_ANIMALS[Math.floor(Math.random() * SCENE_NAME_ANIMALS.length)];
-  const noun = SCENE_NAME_NOUNS[Math.floor(Math.random() * SCENE_NAME_NOUNS.length)];
-  return `${adj} ${animal} ${noun}`;
-}
-
-// Compute the next free `<base>_<n>` name for a duplicated prim. If the source
-// name already ends in `_<n>`, the base is the leading part and we hunt for
-// the next free n. Otherwise n starts at 1.
-function nextDuplicateName(name: string, taken: Set<string>): string {
-  const m = /^(.*)_(\d+)$/.exec(name);
-  const base = m ? m[1] : name;
-  let n = m ? Number(m[2]) + 1 : 1;
-  let candidate = `${base}_${n}`;
-  while (taken.has(candidate)) {
-    n += 1;
-    candidate = `${base}_${n}`;
-  }
-  return candidate;
-}
-
-function newId(): string {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID();
-  }
-  // Fallback for older runtimes; not crypto-strong but unique enough.
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-function isDescendant(
-  prims: PrimNode[],
-  ancestorId: string,
-  candidateId: string
-): boolean {
-  let cur: PrimNode | undefined = prims.find((p) => p.id === candidateId);
-  while (cur) {
-    if (cur.id === ancestorId) return true;
-    if (!cur.parentId) return false;
-    const nextId: string = cur.parentId;
-    cur = prims.find((p) => p.id === nextId);
-  }
-  return false;
-}
-
-// World matrix for a prim by composing local TRS up the parent chain.
-function getWorldMatrix(prims: PrimNode[], id: string): Matrix {
-  const chain: PrimNode[] = [];
-  let cur: PrimNode | undefined = prims.find((p) => p.id === id);
-  while (cur) {
-    chain.unshift(cur);
-    if (!cur.parentId) break;
-    const nextId: string = cur.parentId;
-    cur = prims.find((p) => p.id === nextId);
-  }
-  let m = Matrix.Identity();
-  for (const p of chain) {
-    m = localMatrix(p).multiply(m);
-  }
-  return m;
-}
-
-function localMatrix(p: PrimNode): Matrix {
-  const q = Quaternion.FromEulerAngles(
-    p.rotation[0],
-    p.rotation[1],
-    p.rotation[2]
-  );
-  return Matrix.Compose(
-    new Vector3(p.scale[0], p.scale[1], p.scale[2]),
-    q,
-    new Vector3(p.position[0], p.position[1], p.position[2])
-  );
-}
-
-function invertMatrix(m: Matrix): Matrix {
-  const inv = new Matrix();
-  m.invertToRef(inv);
-  return inv;
-}
-
-function decomposeMatrix(m: Matrix): {
-  position: Vec3;
-  rotation: Vec3;
-  scale: Vec3;
-} {
-  const s = new Vector3();
-  const q = new Quaternion();
-  const t = new Vector3();
-  m.decompose(s, q, t);
-  const e = q.toEulerAngles();
-  return {
-    position: [t.x, t.y, t.z],
-    rotation: [e.x, e.y, e.z],
-    scale: [s.x, s.y, s.z]
-  };
 }

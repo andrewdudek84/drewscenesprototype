@@ -1,5 +1,6 @@
 import { ASSET_LIBRARY } from '../assets';
 import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
+import PaletteImporter from './PaletteImporter';
 
 export default function AssetsPalette() {
   const onDragStart = (
@@ -23,6 +24,11 @@ export default function AssetsPalette() {
 
   return (
     <div className="palette-items">
+      <PaletteImporter
+        palette="asset"
+        dragMime={ASSET_DRAG_MIME}
+        importTitle="Import a .usd / .usda asset from your computer"
+      />
       <div
         className="palette-item"
         draggable

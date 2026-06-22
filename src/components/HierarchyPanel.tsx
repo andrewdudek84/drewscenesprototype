@@ -21,6 +21,9 @@ interface Props {
   onAssetAdd: (assetId: string, parentId: string | null) => void;
   onDelete: (id: string) => void;
   onContextMenu: (primId: string, x: number, y: number) => void;
+  /** Slide-out open state. When false the panel is translated off-screen. */
+  isOpen: boolean;
+  onClose: () => void;
 }
 
 export default function HierarchyPanel({
@@ -34,7 +37,9 @@ export default function HierarchyPanel({
   onShapeAdd,
   onAssetAdd,
   onDelete,
-  onContextMenu
+  onContextMenu,
+  isOpen,
+  onClose
 }: Props) {
   const childrenByParent = useMemo(() => {
     const m = new Map<string | null, PrimNode[]>();
@@ -110,8 +115,19 @@ export default function HierarchyPanel({
   };
 
   return (
-    <aside className="panel hierarchy">
-      <header className="panel-header">Hierarchy</header>
+    <aside className={`panel hierarchy${isOpen ? ' is-open' : ''}`}>
+      <header className="panel-header">
+        <span>Scene</span>
+        <button
+          type="button"
+          className="panel-header-close"
+          onClick={onClose}
+          title="Close scene panel"
+          aria-label="Close scene panel"
+        >
+          ×
+        </button>
+      </header>
       <div
         className="panel-body"
         onClick={() => onSelect(null)}
