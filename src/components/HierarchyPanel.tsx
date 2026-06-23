@@ -5,6 +5,10 @@ import { ASSET_DRAG_MIME, PRIM_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
 interface Props {
   prims: PrimNode[];
   selectedId: string | null;
+  /** Full multi-selection set (always includes `selectedId` when set). Used
+   *  to highlight every Ctrl+click-added prim in the tree, not just the
+   *  gizmo's primary target. */
+  selectedIds: string[];
   /** When set, highlights a specific sub-mesh row inside a reference prim's
    *  asset tree instead of (or in addition to) the prim itself. */
   selectedMeshUid: string | null;
@@ -15,7 +19,11 @@ interface Props {
    *  value is the bound SpatialItem (used by Properties; here we only need
    *  the presence of an entry to show the green check). */
   mappedByPrimId: Map<string, { entityId: string; entityName: string }>;
-  onSelect: (id: string | null, meshUid?: string | null) => void;
+  onSelect: (
+    id: string | null,
+    meshUid?: string | null,
+    additive?: boolean
+  ) => void;
   onReparent: (sourceId: string, parentId: string | null) => void;
   onShapeAdd: (kind: ShapeKind, parentId: string | null) => void;
   onAssetAdd: (assetId: string, parentId: string | null) => void;
@@ -29,6 +37,7 @@ interface Props {
 export default function HierarchyPanel({
   prims,
   selectedId,
+  selectedIds,
   selectedMeshUid,
   assetMeshes,
   mappedByPrimId,
@@ -150,6 +159,7 @@ export default function HierarchyPanel({
                     prim={p}
                     childrenByParent={childrenByParent}
                     selectedId={selectedId}
+                    selectedIds={selectedIds}
                     selectedMeshUid={selectedMeshUid}
                     assetMeshes={assetMeshes}
                     mappedByPrimId={mappedByPrimId}
@@ -175,6 +185,7 @@ interface NodeProps {
   prim: PrimNode;
   childrenByParent: Map<string | null, PrimNode[]>;
   selectedId: string | null;
+  selectedIds: string[];
   selectedMeshUid: string | null;
   assetMeshes: Record<string, AssetMeshNode[]>;
   mappedByPrimId: Map<string, { entityId: string; entityName: string }>;
@@ -182,7 +193,11 @@ interface NodeProps {
    *  selection to be visible. Nodes whose id appears here open themselves
    *  automatically when selection changes (user can still collapse them). */
   expandPath: Set<string>;
-  onSelect: (id: string | null, meshUid?: string | null) => void;
+  onSelect: (
+    id: string | null,
+    meshUid?: string | null,
+    additive?: boolean
+  ) => void;
   onReparent: (sourceId: string, parentId: string | null) => void;
   onShapeAdd: (kind: ShapeKind, parentId: string | null) => void;
   onAssetAdd: (assetId: string, parentId: string | null) => void;
@@ -194,6 +209,7 @@ function TreeNode({
   prim,
   childrenByParent,
   selectedId,
+  selectedIds,
   selectedMeshUid,
   assetMeshes,
   mappedByPrimId,
@@ -269,7 +285,7 @@ function TreeNode({
   };
   const onClick = (ev: React.MouseEvent) => {
     ev.stopPropagation();
-    onSelect(prim.id);
+    onSelect(prim.id, null, ev.ctrlKey || ev.metaKey);
   };
   const onRowContextMenu = (ev: React.MouseEvent) => {
     ev.preventDefault();
@@ -278,7 +294,13 @@ function TreeNode({
     onContextMenu(prim.id, ev.clientX, ev.clientY);
   };
 
+  // "Primary" is the gizmo target — only it gets the scroll-into-view +
+  // strong highlight. Secondary multi-select members get a lighter
+  // highlight via `is-multi-selected` (drives the same styling as the
+  // primary minus the scroll behavior).
   const isSelected = selectedId === prim.id && selectedMeshUid == null;
+  const isInMultiSelection =
+    !isSelected && selectedMeshUid == null && selectedIds.includes(prim.id);
 
   // Scroll our row into the panel viewport whenever this node becomes the
   // selected one (whether the click originated from the viewport or here).
@@ -297,6 +319,7 @@ function TreeNode({
         className={
           'tree-node' +
           (isSelected ? ' is-selected' : '') +
+          (isInMultiSelection ? ' is-multi-selected' : '') +
           (dragOver ? ' is-drop-target' : '')
         }
         draggable
@@ -378,6 +401,7 @@ function TreeNode({
               prim={c}
               childrenByParent={childrenByParent}
               selectedId={selectedId}
+              selectedIds={selectedIds}
               selectedMeshUid={selectedMeshUid}
               assetMeshes={assetMeshes}
               mappedByPrimId={mappedByPrimId}

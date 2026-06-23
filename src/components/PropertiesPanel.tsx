@@ -6,6 +6,7 @@ import type {
 } from '../ontology';
 import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
 import { AssetIcon } from './AssetsPalette';
+import NumericInput from './NumericInput';
 import type { PrimNode, PrimPatch, ShapeKind, SubMeshInfo } from '../types';
 
 interface Props {
@@ -156,16 +157,20 @@ function ModelTypeForm({
   }, [modelType.name, modelType.description]);
 
   const setVecAxis = (
-    key: 'position' | 'rotation',
+    key: 'position' | 'rotation' | 'scale',
     index: 0 | 1 | 2,
     raw: string
   ) => {
     const v = Number(raw);
     if (!Number.isFinite(v)) return;
+    const fallback =
+      key === 'scale' ? { x: 1, y: 1, z: 1 } : { x: 0, y: 0, z: 0 };
     const cur =
       key === 'position'
-        ? modelType.position ?? { x: 0, y: 0, z: 0 }
-        : modelType.rotation ?? { x: 0, y: 0, z: 0 };
+        ? modelType.position ?? fallback
+        : key === 'rotation'
+          ? modelType.rotation ?? fallback
+          : modelType.scale ?? fallback;
     const next = { ...cur };
     if (index === 0) next.x = v;
     else if (index === 1) next.y = v;
@@ -194,17 +199,16 @@ function ModelTypeForm({
           onBlur={() => onUpdate(modelType.name, { description })}
         />
       </Row>
-      {(modelType.name === 'USD' || modelType.position || modelType.rotation) && (
+      {(modelType.name === 'USD' || modelType.position || modelType.rotation || modelType.scale) && (
         <>
           <Row label="Position">
             <div className="props-vec">
               {AXES.map(({ key, index }) => (
                 <label key={key} className={`props-axis axis-${key}`}>
                   <span className="props-axis-label">{key}</span>
-                  <input
+                  <NumericInput
                     className="props-input"
-                    type="number"
-                    step="0.1"
+                    step={0.1}
                     value={round(
                       index === 0
                         ? (modelType.position?.x ?? 0)
@@ -212,7 +216,7 @@ function ModelTypeForm({
                           ? (modelType.position?.y ?? 0)
                           : (modelType.position?.z ?? 0)
                     )}
-                    onChange={(e) => setVecAxis('position', index, e.target.value)}
+                    onValueChange={(v) => setVecAxis('position', index, v)}
                   />
                 </label>
               ))}
@@ -223,10 +227,9 @@ function ModelTypeForm({
               {AXES.map(({ key, index }) => (
                 <label key={key} className={`props-axis axis-${key}`}>
                   <span className="props-axis-label">{key}</span>
-                  <input
+                  <NumericInput
                     className="props-input"
-                    type="number"
-                    step="0.1"
+                    step={0.1}
                     value={round(
                       index === 0
                         ? (modelType.rotation?.x ?? 0)
@@ -234,7 +237,28 @@ function ModelTypeForm({
                           ? (modelType.rotation?.y ?? 0)
                           : (modelType.rotation?.z ?? 0)
                     )}
-                    onChange={(e) => setVecAxis('rotation', index, e.target.value)}
+                    onValueChange={(v) => setVecAxis('rotation', index, v)}
+                  />
+                </label>
+              ))}
+            </div>
+          </Row>
+          <Row label="Scale">
+            <div className="props-vec">
+              {AXES.map(({ key, index }) => (
+                <label key={key} className={`props-axis axis-${key}`}>
+                  <span className="props-axis-label">{key}</span>
+                  <NumericInput
+                    className="props-input"
+                    step={0.1}
+                    value={round(
+                      index === 0
+                        ? (modelType.scale?.x ?? 1)
+                        : index === 1
+                          ? (modelType.scale?.y ?? 1)
+                          : (modelType.scale?.z ?? 1)
+                    )}
+                    onValueChange={(v) => setVecAxis('scale', index, v)}
                   />
                 </label>
               ))}
@@ -433,16 +457,20 @@ function EntityInstanceForm({
   // `target`. The child route is used by the merged USD section below.
   const setVecAxis = (
     target: OntologyEntity,
-    key: 'position' | 'rotation',
+    key: 'position' | 'rotation' | 'scale',
     index: 0 | 1 | 2,
     raw: string
   ) => {
     const v = Number(raw);
     if (!Number.isFinite(v)) return;
+    const fallback =
+      key === 'scale' ? { x: 1, y: 1, z: 1 } : { x: 0, y: 0, z: 0 };
     const cur =
       key === 'position'
-        ? target.position ?? { x: 0, y: 0, z: 0 }
-        : target.rotation ?? { x: 0, y: 0, z: 0 };
+        ? target.position ?? fallback
+        : key === 'rotation'
+          ? target.rotation ?? fallback
+          : target.scale ?? fallback;
     const next = { ...cur };
     if (index === 0) next.x = v;
     else if (index === 1) next.y = v;
@@ -483,10 +511,9 @@ function EntityInstanceForm({
               {AXES.map(({ key, index }) => (
                 <label key={key} className={`props-axis axis-${key}`}>
                   <span className="props-axis-label">{key}</span>
-                  <input
+                  <NumericInput
                     className="props-input"
-                    type="number"
-                    step="0.1"
+                    step={0.1}
                     value={round(
                       index === 0
                         ? (entity.position?.x ?? 0)
@@ -494,7 +521,7 @@ function EntityInstanceForm({
                           ? (entity.position?.y ?? 0)
                           : (entity.position?.z ?? 0)
                     )}
-                    onChange={(e) => setVecAxis(entity, 'position', index, e.target.value)}
+                    onValueChange={(v) => setVecAxis(entity, 'position', index, v)}
                   />
                 </label>
               ))}
@@ -505,10 +532,9 @@ function EntityInstanceForm({
               {AXES.map(({ key, index }) => (
                 <label key={key} className={`props-axis axis-${key}`}>
                   <span className="props-axis-label">{key}</span>
-                  <input
+                  <NumericInput
                     className="props-input"
-                    type="number"
-                    step="0.1"
+                    step={0.1}
                     value={round(
                       index === 0
                         ? (entity.rotation?.x ?? 0)
@@ -516,7 +542,7 @@ function EntityInstanceForm({
                           ? (entity.rotation?.y ?? 0)
                           : (entity.rotation?.z ?? 0)
                     )}
-                    onChange={(e) => setVecAxis(entity, 'rotation', index, e.target.value)}
+                    onValueChange={(v) => setVecAxis(entity, 'rotation', index, v)}
                   />
                 </label>
               ))}
@@ -596,15 +622,15 @@ function UsdChildSection({
   onUpdatePrim: (id: string, patch: PrimPatch) => void;
   setVecAxis: (
     target: OntologyEntity,
-    key: 'position' | 'rotation',
+    key: 'position' | 'rotation' | 'scale',
     index: 0 | 1 | 2,
     raw: string
   ) => void;
 }) {
-  // Read position/rotation. When a prim is bound, prefer its live values so
-  // the form moves with the viewport gizmo; otherwise fall back to the
-  // entity record. Rotation is stored as radians on the prim (matching the
-  // standard prim Form) and displayed/edited in degrees here.
+  // Read position/rotation/scale. When a prim is bound, prefer its live
+  // values so the form moves with the viewport gizmo; otherwise fall back
+  // to the entity record. Rotation is stored as radians on the prim
+  // (matching the standard prim Form) and displayed/edited in degrees here.
   const posTriple: [number, number, number] = prim
     ? [prim.position[0], prim.position[1], prim.position[2]]
     : [child.position?.x ?? 0, child.position?.y ?? 0, child.position?.z ?? 0];
@@ -615,6 +641,9 @@ function UsdChildSection({
         (prim.rotation[2] * 180) / Math.PI
       ]
     : [child.rotation?.x ?? 0, child.rotation?.y ?? 0, child.rotation?.z ?? 0];
+  const scaleTriple: [number, number, number] = prim
+    ? [prim.scale[0], prim.scale[1], prim.scale[2]]
+    : [child.scale?.x ?? 1, child.scale?.y ?? 1, child.scale?.z ?? 1];
 
   const setPositionAxis = (index: 0 | 1 | 2, raw: string) => {
     const v = Number(raw);
@@ -638,6 +667,17 @@ function UsdChildSection({
       setVecAxis(child, 'rotation', index, raw);
     }
   };
+  const setScaleAxis = (index: 0 | 1 | 2, raw: string) => {
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return;
+    if (prim) {
+      const next = [...prim.scale] as PrimNode['scale'];
+      next[index] = v;
+      onUpdatePrim(prim.id, { scale: next });
+    } else {
+      setVecAxis(child, 'scale', index, raw);
+    }
+  };
   return (
     <>
       <div className="props-section-header">USD</div>
@@ -646,12 +686,11 @@ function UsdChildSection({
           {AXES.map(({ key, index }) => (
             <label key={key} className={`props-axis axis-${key}`}>
               <span className="props-axis-label">{key}</span>
-              <input
+              <NumericInput
                 className="props-input"
-                type="number"
-                step="0.1"
+                step={0.1}
                 value={round(posTriple[index])}
-                onChange={(e) => setPositionAxis(index, e.target.value)}
+                onValueChange={(v) => setPositionAxis(index, v)}
               />
             </label>
           ))}
@@ -662,12 +701,26 @@ function UsdChildSection({
           {AXES.map(({ key, index }) => (
             <label key={key} className={`props-axis axis-${key}`}>
               <span className="props-axis-label">{key}</span>
-              <input
+              <NumericInput
                 className="props-input"
-                type="number"
-                step="0.1"
+                step={0.1}
                 value={round(rotTripleDeg[index])}
-                onChange={(e) => setRotationAxis(index, e.target.value)}
+                onValueChange={(v) => setRotationAxis(index, v)}
+              />
+            </label>
+          ))}
+        </div>
+      </Row>
+      <Row label="Scale">
+        <div className="props-vec">
+          {AXES.map(({ key, index }) => (
+            <label key={key} className={`props-axis axis-${key}`}>
+              <span className="props-axis-label">{key}</span>
+              <NumericInput
+                className="props-input"
+                step={0.1}
+                value={round(scaleTriple[index])}
+                onValueChange={(v) => setScaleAxis(index, v)}
               />
             </label>
           ))}
@@ -807,12 +860,11 @@ function Form({
           {AXES.map(({ key, index }) => (
             <label key={key} className={`props-axis axis-${key}`}>
               <span className="props-axis-label">{key}</span>
-              <input
+              <NumericInput
                 className="props-input"
-                type="number"
-                step="0.1"
+                step={0.1}
                 value={round(prim.position[index])}
-                onChange={(e) => setPositionAxis(index, e.target.value)}
+                onValueChange={(v) => setPositionAxis(index, v)}
               />
             </label>
           ))}
@@ -823,12 +875,11 @@ function Form({
           {AXES.map(({ key, index }) => (
             <label key={key} className={`props-axis axis-${key}`}>
               <span className="props-axis-label">{key}</span>
-              <input
+              <NumericInput
                 className="props-input"
-                type="number"
-                step="5"
+                step={5}
                 value={round((prim.rotation[index] * 180) / Math.PI)}
-                onChange={(e) => setRotationAxisDeg(index, e.target.value)}
+                onValueChange={(v) => setRotationAxisDeg(index, v)}
               />
             </label>
           ))}
@@ -839,12 +890,11 @@ function Form({
           {AXES.map(({ key, index }) => (
             <label key={key} className={`props-axis axis-${key}`}>
               <span className="props-axis-label">{key}</span>
-              <input
+              <NumericInput
                 className="props-input"
-                type="number"
-                step="0.1"
+                step={0.1}
                 value={round(prim.scale[index])}
-                onChange={(e) => setScaleAxis(index, e.target.value)}
+                onValueChange={(v) => setScaleAxis(index, v)}
               />
             </label>
           ))}
@@ -1139,15 +1189,14 @@ function ColorRow({
             value={alpha}
             onChange={(e) => onChange(formatColor(hex6, Number(e.target.value)))}
           />
-          <input
-            type="number"
+          <NumericInput
             className="props-input props-alpha-num"
             min={0}
             max={1}
             step={0.01}
             value={round(alpha)}
-            onChange={(e) => {
-              const n = Number(e.target.value);
+            onValueChange={(raw) => {
+              const n = Number(raw);
               if (Number.isFinite(n)) {
                 onChange(formatColor(hex6, Math.max(0, Math.min(1, n))));
               }

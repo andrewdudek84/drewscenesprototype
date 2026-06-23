@@ -50,6 +50,11 @@ interface Props {
   prims: PrimNode[];
   tool: ToolMode;
   selectedId: string | null;
+  /** Full multi-selection set (always includes `selectedId` when set). Each
+   *  prim in this list is outlined; when the position gizmo is dragged the
+   *  group moves together. The "primary" of the selection — the one the
+   *  gizmo actually attaches to — is `selectedId`. */
+  selectedIds: string[];
   /** When set, identifies a specific sub-mesh inside a loaded reference
    *  asset (GLB/OBJ) that should be highlighted instead of the whole prim. */
   selectedMeshUid: string | null;
@@ -58,8 +63,17 @@ interface Props {
   focusSignal: number;
   onShapeDropped: (kind: ShapeKind, position: [number, number, number]) => void;
   onAssetDropped: (assetId: string, position: [number, number, number]) => void;
-  onSelect: (id: string | null, meshUid?: string | null) => void;
+  onSelect: (
+    id: string | null,
+    meshUid?: string | null,
+    additive?: boolean
+  ) => void;
   onTransform: (id: string, t: Partial<PrimTransform>) => void;
+  /** Batch transform writer used after a group move so the secondary
+   *  selection's new positions land in a single setPrims commit. */
+  onTransformMany: (
+    updates: Array<{ id: string; t: Partial<PrimTransform> }>
+  ) => void;
   /** Called whenever a reference prim's GLB/OBJ has finished loading (or has
    *  been cleared because its source changed). `nodes` is empty when the
    *  asset is being reset. */
@@ -74,6 +88,15 @@ interface Props {
   /** Fired on right-click over a mesh; coords are page-space. Empty space
    *  right-clicks are ignored (no menu shown). */
   onContextMenu: (primId: string, x: number, y: number) => void;
+  /** Called when the user mousedowns on a gizmo handle to start a
+   *  position/rotation/scale drag. Lets App open a single undo batch so
+   *  every per-tick transform commit collapses into one history entry
+   *  representing the pre-drag state. */
+  onBeginTransformBatch: () => void;
+  /** Called when the user releases the gizmo. Closes the open undo batch
+   *  so a single entry is pushed using the snapshot captured at
+   *  onBeginTransformBatch time. */
+  onEndTransformBatch: () => void;
 }
 
 // Translation snap = the grid's minor tick (FR-14.3 in the spec: 1 m).
@@ -96,6 +119,7 @@ export default function Viewport({
   prims,
   tool,
   selectedId,
+  selectedIds,
   selectedMeshUid,
   theme,
   focusSignal,
@@ -103,10 +127,13 @@ export default function Viewport({
   onAssetDropped,
   onSelect,
   onTransform,
+  onTransformMany,
   onAssetMeshesLoaded,
   onSubMeshInfoChange,
   snapEnabled,
-  onContextMenu
+  onContextMenu,
+  onBeginTransformBatch,
+  onEndTransformBatch
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -127,6 +154,10 @@ export default function Viewport({
   const lastPositionGizmoRef = useRef<IPositionGizmo | null>(null);
   const lastRotationGizmoRef = useRef<IRotationGizmo | null>(null);
   const lastScaleGizmoRef = useRef<IScaleGizmo | null>(null);
+  // Prim ids whose meshes are currently being driven by a live gizmo drag.
+  // Reconcile skips re-writing transforms for these so the per-tick state
+  // commits don't race the gizmo / direct mesh writes and snap them back.
+  const draggingIdsRef = useRef<Set<string>>(new Set());
 
   // Tool mode tracked in a ref so the once-attached pointer observable can
   // branch on the current tool without being re-attached.
@@ -151,15 +182,23 @@ export default function Viewport({
   const clearMeasurementRef = useRef<() => void>(() => {});
 
   const [cameraView, setCameraView] = useState<CameraView>('perspective');
+  // Outstanding async reference-asset loads (OBJ/GLB). Drives the loader bar
+  // overlay; >0 means at least one reference prim is still loading. The
+  // counter is bumped inside the reconcile effect's `loadReference` wrapper
+  // and decremented in a finally so a failed load also clears it.
+  const [loadingCount, setLoadingCount] = useState(0);
 
   // Latest callbacks captured so the once-attached listeners always see fresh state.
   const onDropRef = useRef(onShapeDropped);
   const onAssetDropRef = useRef(onAssetDropped);
   const onSelectRef = useRef(onSelect);
   const onTransformRef = useRef(onTransform);
+  const onTransformManyRef = useRef(onTransformMany);
   const onAssetMeshesLoadedRef = useRef(onAssetMeshesLoaded);
   const onSubMeshInfoChangeRef = useRef(onSubMeshInfoChange);
   const onContextMenuRef = useRef(onContextMenu);
+  const onBeginTransformBatchRef = useRef(onBeginTransformBatch);
+  const onEndTransformBatchRef = useRef(onEndTransformBatch);
   // Latest prim list captured so the canvas right-click handler can walk to
   // the topmost ancestor of whatever was picked.
   const primsRef = useRef<PrimNode[]>(prims);
@@ -170,6 +209,15 @@ export default function Viewport({
   // without re-running every time the user clicks something new.
   const selectedIdRef = useRef(selectedId);
   const selectedMeshUidRef = useRef(selectedMeshUid);
+  // Multi-selection captured for the position-gizmo's group-move path. The
+  // ref is updated by the props effect below; the gizmo's drag observer
+  // reads it at drag start to pick up the current "secondary" prims.
+  const selectedIdsRef = useRef<string[]>(selectedIds);
+  // Currently-outlined meshes. The selection effect diffs against this set
+  // so a stable selection across drag ticks does no edge-renderer work.
+  // enableEdgesRendering rebuilds geometry on every call; blindly toggling
+  // it per frame is the dominant cost in multi-select gizmo drags.
+  const outlinedMeshesRef = useRef<Set<AbstractMesh>>(new Set());
   useEffect(() => {
     onDropRef.current = onShapeDropped;
   }, [onShapeDropped]);
@@ -183,6 +231,9 @@ export default function Viewport({
     onTransformRef.current = onTransform;
   }, [onTransform]);
   useEffect(() => {
+    onTransformManyRef.current = onTransformMany;
+  }, [onTransformMany]);
+  useEffect(() => {
     onAssetMeshesLoadedRef.current = onAssetMeshesLoaded;
   }, [onAssetMeshesLoaded]);
   useEffect(() => {
@@ -192,6 +243,12 @@ export default function Viewport({
     onContextMenuRef.current = onContextMenu;
   }, [onContextMenu]);
   useEffect(() => {
+    onBeginTransformBatchRef.current = onBeginTransformBatch;
+  }, [onBeginTransformBatch]);
+  useEffect(() => {
+    onEndTransformBatchRef.current = onEndTransformBatch;
+  }, [onEndTransformBatch]);
+  useEffect(() => {
     primsRef.current = prims;
   }, [prims]);
   useEffect(() => {
@@ -200,6 +257,9 @@ export default function Viewport({
   useEffect(() => {
     selectedMeshUidRef.current = selectedMeshUid;
   }, [selectedMeshUid]);
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
   // Re-apply snap distances to the live gizmos whenever the toggle flips.
   useEffect(() => {
     snapEnabledRef.current = snapEnabled;
@@ -348,6 +408,200 @@ export default function Viewport({
       });
     };
 
+    // Group-move bookkeeping for the position gizmo. We capture the primary
+    // mesh + each secondary mesh's world position at drag start, then mirror
+    // the primary's world-space delta onto every secondary mesh on every
+    // drag tick. Drag end commits the new local positions in a single batch.
+    // Only "independent" secondaries are tracked — i.e. ones whose ancestor
+    // chain doesn't contain any other selected prim, so we don't translate
+    // a child both via its parent and again on its own.
+    type GroupMoveEntry = {
+      mesh: AbstractMesh;
+      primId: string;
+      startWorld: Vector3;
+    };
+    let groupMoveStart: {
+      primaryStart: Vector3;
+      others: GroupMoveEntry[];
+    } | null = null;
+
+    const independentSelectedIds = (allIds: string[]): string[] => {
+      const set = new Set(allIds);
+      const byId = new Map(
+        primsRef.current.map((p) => [p.id, p] as const)
+      );
+      return allIds.filter((id) => {
+        let cur = byId.get(id);
+        let parent = cur?.parentId ?? null;
+        while (parent) {
+          if (set.has(parent)) return false;
+          cur = byId.get(parent);
+          parent = cur?.parentId ?? null;
+        }
+        return true;
+      });
+    };
+
+    const markAttachedDragging = () => {
+      const m = gizmoMgr.attachedMesh;
+      const id = (m?.metadata as { primId?: string } | undefined)?.primId;
+      if (id) draggingIdsRef.current.add(id);
+    };
+    const unmarkAttachedDragging = () => {
+      const m = gizmoMgr.attachedMesh;
+      const id = (m?.metadata as { primId?: string } | undefined)?.primId;
+      if (id) draggingIdsRef.current.delete(id);
+    };
+
+    const onPositionDragStart = () => {
+      // Open a single undo batch so every per-tick transform commit during
+      // the drag collapses into one history entry (using the snapshot from
+      // BEFORE the drag).
+      onBeginTransformBatchRef.current();
+      const primary = gizmoMgr.attachedMesh;
+      if (!primary) {
+        groupMoveStart = null;
+        return;
+      }
+      const primaryId = (primary.metadata as { primId?: string } | undefined)
+        ?.primId;
+      // Mark the primary as live-driven so reconcile doesn't fight the
+      // gizmo when we commit its position every drag tick.
+      if (primaryId) draggingIdsRef.current.add(primaryId);
+      const all = selectedIdsRef.current;
+      if (!primaryId || all.length <= 1) {
+        groupMoveStart = null;
+        return;
+      }
+      const others: GroupMoveEntry[] = [];
+      for (const id of independentSelectedIds(all)) {
+        if (id === primaryId) continue;
+        const mesh = meshesRef.current.get(id);
+        if (!mesh) continue;
+        // Force fresh world matrices so the captured start positions match
+        // the live scene state, not a stale cache.
+        mesh.computeWorldMatrix(true);
+        others.push({
+          mesh,
+          primId: id,
+          startWorld: mesh.getAbsolutePosition().clone()
+        });
+        draggingIdsRef.current.add(id);
+      }
+      if (others.length === 0) {
+        groupMoveStart = null;
+        return;
+      }
+      primary.computeWorldMatrix(true);
+      groupMoveStart = {
+        primaryStart: primary.getAbsolutePosition().clone(),
+        others
+      };
+    };
+
+    const onPositionDrag = () => {
+      // Move secondaries first so they stay perfectly in sync with the
+      // primary on the current frame. We DO NOT commit secondaries to React
+      // state on every tick — that round-trips through render+reconcile and
+      // visibly lags behind the gizmo. The drag-end handler commits them in
+      // one batch instead. The primary's state is still committed live so
+      // the Properties panel inputs follow along.
+      const state = groupMoveStart;
+      if (state) {
+        const primary = gizmoMgr.attachedMesh;
+        if (primary) {
+          // getAbsolutePosition() returns a cached value; force a fresh
+          // world-matrix compute so the delta below reflects THIS frame's
+          // gizmo translation, not the previous frame's. Without this the
+          // secondaries trail by a frame and drag-end commits them short.
+          primary.computeWorldMatrix(true);
+          const cur = primary.getAbsolutePosition();
+          const dx = cur.x - state.primaryStart.x;
+          const dy = cur.y - state.primaryStart.y;
+          const dz = cur.z - state.primaryStart.z;
+          for (const o of state.others) {
+            const targetWorld = new Vector3(
+              o.startWorld.x + dx,
+              o.startWorld.y + dy,
+              o.startWorld.z + dz
+            );
+            const parent = o.mesh.parent;
+            if (parent && parent instanceof TransformNode) {
+              parent.computeWorldMatrix(true);
+              const inv = Matrix.Invert(parent.getWorldMatrix());
+              const local = Vector3.TransformCoordinates(targetWorld, inv);
+              o.mesh.position.copyFrom(local);
+            } else {
+              o.mesh.position.copyFrom(targetWorld);
+            }
+            o.mesh.computeWorldMatrix(true);
+          }
+        }
+      }
+      // Commit the primary's pose so Properties inputs update live.
+      commitFromMesh();
+    };
+
+    const onPositionDragEnd = () => {
+      // Run one final group-sync from the primary's FINAL world position so
+      // the secondaries match exactly. The last onPositionDrag tick may have
+      // run before Babylon settled the gizmo on its release frame.
+      const state = groupMoveStart;
+      const primaryMesh = gizmoMgr.attachedMesh;
+      if (state && primaryMesh) {
+        primaryMesh.computeWorldMatrix(true);
+        const cur = primaryMesh.getAbsolutePosition();
+        const dx = cur.x - state.primaryStart.x;
+        const dy = cur.y - state.primaryStart.y;
+        const dz = cur.z - state.primaryStart.z;
+        for (const o of state.others) {
+          const targetWorld = new Vector3(
+            o.startWorld.x + dx,
+            o.startWorld.y + dy,
+            o.startWorld.z + dz
+          );
+          const parent = o.mesh.parent;
+          if (parent && parent instanceof TransformNode) {
+            parent.computeWorldMatrix(true);
+            const inv = Matrix.Invert(parent.getWorldMatrix());
+            const local = Vector3.TransformCoordinates(targetWorld, inv);
+            o.mesh.position.copyFrom(local);
+          } else {
+            o.mesh.position.copyFrom(targetWorld);
+          }
+        }
+      }
+      // Commit the primary first via the shared single-target path, then
+      // batch-commit every secondary mesh in one state update.
+      commitFromMesh();
+      groupMoveStart = null;
+      const primaryId = (
+        primaryMesh?.metadata as { primId?: string } | undefined
+      )?.primId;
+      if (primaryId) draggingIdsRef.current.delete(primaryId);
+      if (!state) {
+        // Single-selection drag still needs to close the undo batch that
+        // onPositionDragStart opened — otherwise batchingRef stays set
+        // forever and subsequent edits never produce a history entry.
+        onEndTransformBatchRef.current();
+        return;
+      }
+      const updates: Array<{
+        id: string;
+        t: Partial<PrimTransform>;
+      }> = state.others.map((o) => ({
+        id: o.primId,
+        t: {
+          position: [o.mesh.position.x, o.mesh.position.y, o.mesh.position.z]
+        }
+      }));
+      for (const o of state.others) draggingIdsRef.current.delete(o.primId);
+      onTransformManyRef.current(updates);
+      // Close the undo batch opened in onPositionDragStart. Done after the
+      // batch commit so the final state lands before the snapshot record.
+      onEndTransformBatchRef.current();
+    };
+
     // Gizmos are lazily (re-)created when the manager enables them, so we
     // re-apply snap and hook the commit callback whenever a new gizmo instance shows up.
     ensureSnapRef.current = () => {
@@ -356,7 +610,9 @@ export default function Viewport({
       if (p) {
         p.snapDistance = snap ? POSITION_SNAP : 0;
         if (p !== lastPositionGizmoRef.current) {
-          p.onDragEndObservable.add(commitFromMesh);
+          p.onDragStartObservable.add(onPositionDragStart);
+          p.onDragObservable.add(onPositionDrag);
+          p.onDragEndObservable.add(onPositionDragEnd);
           lastPositionGizmoRef.current = p;
         }
       }
@@ -368,7 +624,12 @@ export default function Viewport({
           // mesh's rotation when its scale is non-uniform and the drag stops
           // responding; world-aligned rings sidestep that entirely.
           r.updateGizmoRotationToMatchAttachedMesh = false;
+          r.onDragStartObservable.add(markAttachedDragging);
+          r.onDragStartObservable.add(() => onBeginTransformBatchRef.current());
+          r.onDragObservable.add(commitFromMesh);
+          r.onDragEndObservable.add(unmarkAttachedDragging);
           r.onDragEndObservable.add(commitFromMesh);
+          r.onDragEndObservable.add(() => onEndTransformBatchRef.current());
           lastRotationGizmoRef.current = r;
         }
       }
@@ -379,7 +640,12 @@ export default function Viewport({
           // Make the drag-to-scale ratio track mouse travel ~1:1 instead of
           // Babylon's default fractional response.
           s.sensitivity = 4;
+          s.onDragStartObservable.add(markAttachedDragging);
+          s.onDragStartObservable.add(() => onBeginTransformBatchRef.current());
+          s.onDragObservable.add(commitFromMesh);
+          s.onDragEndObservable.add(unmarkAttachedDragging);
           s.onDragEndObservable.add(commitFromMesh);
+          s.onDragEndObservable.add(() => onEndTransformBatchRef.current());
           lastScaleGizmoRef.current = s;
         }
       }
@@ -515,14 +781,18 @@ export default function Viewport({
       if (info.type !== PointerEventTypes.POINTERTAP) return;
       const ev = info.event as PointerEvent;
       if (ev.button !== 0) return;
+      // Ctrl (Win/Linux) and Cmd (mac) toggle a prim into the multi-selection
+      // instead of replacing it. Clicks on empty space with the modifier
+      // held are ignored so the existing multi-selection isn't wiped out.
+      const additive = ev.ctrlKey || ev.metaKey;
       const pick = info.pickInfo;
       if (!pick?.hit) {
-        onSelectRef.current(null);
+        if (!additive) onSelectRef.current(null);
         return;
       }
       const m = pick.pickedMesh;
       if (m === ground) {
-        onSelectRef.current(null);
+        if (!additive) onSelectRef.current(null);
         return;
       }
       const id = (m?.metadata as { primId?: string } | undefined)?.primId;
@@ -532,7 +802,7 @@ export default function Viewport({
         const uid = m ? String(m.uniqueId) : null;
         const meshUid =
           uid && subMeshRegistryRef.current.has(uid) ? uid : null;
-        onSelectRef.current(id, meshUid);
+        onSelectRef.current(id, meshUid, additive);
       }
       // Otherwise we probably tapped a gizmo handle; leave selection alone.
     });
@@ -604,29 +874,10 @@ export default function Viewport({
     canvas.addEventListener('dragover', onDragOver);
     canvas.addEventListener('drop', onDrop);
 
-    // Right-click: pick the topmost ancestor under the cursor and fire the
-    // context-menu callback. Always suppress the browser's default menu so
-    // empty-space right-clicks still don't pop a generic browser menu.
+    // Right-click in the viewport is disabled by user request. We still
+    // swallow the event so the browser's default context menu doesn't pop.
     const onCanvasContextMenu = (ev: MouseEvent) => {
       ev.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      const y = ev.clientY - rect.top;
-      const pick = scene.pick(x, y);
-      if (!pick?.hit) return;
-      const picked = pick.pickedMesh;
-      if (!picked || picked === ground) return;
-      const primId = (picked.metadata as { primId?: string } | undefined)?.primId;
-      if (!primId) return;
-      const byId = new Map(primsRef.current.map((p) => [p.id, p] as const));
-      let cur = byId.get(primId);
-      if (!cur) return;
-      while (cur.parentId) {
-        const parent = byId.get(cur.parentId);
-        if (!parent) break;
-        cur = parent;
-      }
-      onContextMenuRef.current(cur.id, ev.clientX, ev.clientY);
     };
     canvas.addEventListener('contextmenu', onCanvasContextMenu);
 
@@ -664,17 +915,31 @@ export default function Viewport({
     const existingMats = materialsRef.current;
     const seen = new Set<string>();
 
+    // Wrapper around loadGltfReference that bumps loadingCount up/down so
+    // the loader bar overlay reflects outstanding async asset loads. Used
+    // for both initial spawn and edit-the-source reload.
+    const loadReference = (
+      parent: Mesh,
+      assetSource: string,
+      primId: string
+    ): void => {
+      setLoadingCount((c) => c + 1);
+      void loadGltfReference(
+        parent,
+        assetSource,
+        scene,
+        primId,
+        subMeshRegistryRef.current,
+        (nodes) => onAssetMeshesLoadedRef.current(primId, nodes)
+      ).finally(() => setLoadingCount((c) => Math.max(0, c - 1)));
+    };
+
     // Pass 1: create/update meshes + materials + transforms.
     for (const prim of prims) {
       seen.add(prim.id);
       let mesh = existingMeshes.get(prim.id);
       if (!mesh) {
-        mesh = buildShapeMesh(
-          prim,
-          scene,
-          subMeshRegistryRef.current,
-          (nodes) => onAssetMeshesLoadedRef.current(prim.id, nodes)
-        );
+        mesh = buildShapeMesh(prim, scene, loadReference);
         existingMeshes.set(prim.id, mesh);
       } else if (prim.kind === 'reference') {
         // Reload the GLB if the user edited the source path.
@@ -687,32 +952,41 @@ export default function Viewport({
           onAssetMeshesLoadedRef.current(prim.id, []);
           mesh.metadata = { primId: prim.id };
           if (prim.assetSource) {
-            void loadGltfReference(
-              mesh,
-              prim.assetSource,
-              scene,
-              prim.id,
-              subMeshRegistryRef.current,
-              (nodes) => onAssetMeshesLoadedRef.current(prim.id, nodes)
-            );
+            loadReference(mesh, prim.assetSource, prim.id);
           }
         }
       }
-      mesh.position.set(prim.position[0], prim.position[1], prim.position[2]);
-      // Drive rotation via quaternion only — the RotationGizmo writes to
-      // rotationQuaternion, and a non-null quaternion takes precedence over
-      // mesh.rotation in Babylon's world-matrix composition.
-      const q = Quaternion.FromEulerAngles(
-        prim.rotation[0],
-        prim.rotation[1],
-        prim.rotation[2]
-      );
-      if (mesh.rotationQuaternion) {
-        mesh.rotationQuaternion.copyFrom(q);
-      } else {
-        mesh.rotationQuaternion = q;
+      // Skip transform writes for meshes that a gizmo drag is actively
+      // driving. The per-tick state commits we do for live Properties
+      // updates would otherwise race the gizmo (primary) or stomp on the
+      // direct mesh writes we make for group secondaries, causing a
+      // visible lag/snap-back. Drag-end clears the id and the next render
+      // re-syncs naturally.
+      if (!draggingIdsRef.current.has(prim.id)) {
+        mesh.position.set(prim.position[0], prim.position[1], prim.position[2]);
+        // Drive rotation via quaternion only — the RotationGizmo writes to
+        // rotationQuaternion, and a non-null quaternion takes precedence over
+        // mesh.rotation in Babylon's world-matrix composition.
+        const q = Quaternion.FromEulerAngles(
+          prim.rotation[0],
+          prim.rotation[1],
+          prim.rotation[2]
+        );
+        if (mesh.rotationQuaternion) {
+          mesh.rotationQuaternion.copyFrom(q);
+        } else {
+          mesh.rotationQuaternion = q;
+        }
+        mesh.scaling.set(prim.scale[0], prim.scale[1], prim.scale[2]);
+      } else if (!mesh.rotationQuaternion) {
+        // Ensure the quaternion exists even when we skip the write, so the
+        // RotationGizmo has something to drive on the very first drag.
+        mesh.rotationQuaternion = Quaternion.FromEulerAngles(
+          prim.rotation[0],
+          prim.rotation[1],
+          prim.rotation[2]
+        );
       }
-      mesh.scaling.set(prim.scale[0], prim.scale[1], prim.scale[2]);
 
       let mat = existingMats.get(prim.id);
       if (!mat) {
@@ -764,16 +1038,6 @@ export default function Viewport({
     const mgr = gizmoMgrRef.current;
     if (!mgr) return;
 
-    // Clear edges on every mesh, including sub-meshes from loaded assets.
-    for (const m of meshesRef.current.values()) {
-      if (m.edgesRenderer) m.disableEdgesRendering();
-    }
-    for (const n of subMeshRegistryRef.current.values()) {
-      if (n instanceof AbstractMesh && n.edgesRenderer) {
-        n.disableEdgesRendering();
-      }
-    }
-
     const primMesh = selectedId
       ? meshesRef.current.get(selectedId) ?? null
       : null;
@@ -784,28 +1048,54 @@ export default function Viewport({
         ? subMeshRegistryRef.current.get(selectedMeshUid) ?? null
         : null;
 
-    const outlineOne = (m: AbstractMesh): void => {
+    // Build the desired outlined-mesh set. Anything with geometry is fair
+    // game; meshes with zero vertices (e.g. asset group transforms) are
+    // skipped because enableEdgesRendering would no-op on them anyway.
+    const desired = new Set<AbstractMesh>();
+    const addOutlineTarget = (m: AbstractMesh): void => {
       if (m.getTotalVertices() === 0) return;
-      m.enableEdgesRendering();
-      m.edgesWidth = SELECTION_EDGE_WIDTH;
-      m.edgesColor = SELECTION_COLOR;
+      desired.add(m);
     };
-
     if (subNode) {
       // The selected sub-node can be a leaf mesh *or* an intermediate group
       // (e.g. `Object331` / `04 - HVP01` in OBJ assets, which load as a
       // TransformNode with primitive child meshes). For groups, the node
       // itself has no geometry, so outline every descendant mesh so the
       // whole group lights up.
-      if (subNode instanceof AbstractMesh) outlineOne(subNode);
-      for (const d of subNode.getChildMeshes(false)) outlineOne(d);
-    } else if (primMesh) {
-      // Top-level prim selection: outline the prim's mesh and every
-      // descendant mesh. Asset groups carry no geometry of their own, so
-      // walking descendants is what actually lights up the asset.
-      outlineOne(primMesh);
-      for (const d of primMesh.getChildMeshes(false)) outlineOne(d);
+      if (subNode instanceof AbstractMesh) addOutlineTarget(subNode);
+      for (const d of subNode.getChildMeshes(false)) addOutlineTarget(d);
+    } else {
+      // Top-level prim selection: outline every prim in the multi-selection
+      // set. Each prim's root mesh + every descendant mesh is lit up, since
+      // asset groups carry no geometry of their own.
+      for (const id of selectedIds) {
+        const mesh = meshesRef.current.get(id);
+        if (!mesh) continue;
+        addOutlineTarget(mesh);
+        for (const d of mesh.getChildMeshes(false)) addOutlineTarget(d);
+      }
     }
+
+    // Diff against the previous outlined set so a stable selection across
+    // drag ticks (effect re-runs every time `prims` changes) does ZERO edge-
+    // renderer work. enableEdgesRendering rebuilds geometry on every call,
+    // so blindly toggling it per frame for multi-selection was the main
+    // source of multi-select slowdown.
+    const prev = outlinedMeshesRef.current;
+    for (const m of prev) {
+      if (!desired.has(m)) {
+        // Mesh may have been disposed during reconcile; guard the call.
+        if (!m.isDisposed() && m.edgesRenderer) m.disableEdgesRendering();
+      }
+    }
+    for (const m of desired) {
+      if (!prev.has(m)) {
+        m.enableEdgesRendering();
+        m.edgesWidth = SELECTION_EDGE_WIDTH;
+        m.edgesColor = SELECTION_COLOR;
+      }
+    }
+    outlinedMeshesRef.current = desired;
 
     // Surface the picked sub-mesh's local pose to the Properties panel.
     // Only TransformNode (and its subclass AbstractMesh) carry position +
@@ -826,7 +1116,7 @@ export default function Viewport({
     mgr.scaleGizmoEnabled = wantScale;
     ensureSnapRef.current();
     mgr.attachToMesh(primMesh);
-  }, [selectedId, selectedMeshUid, tool, prims]);
+  }, [selectedId, selectedIds, selectedMeshUid, tool, prims]);
 
   // Measure tool side-effects: swap the canvas cursor for a crosshair and
   // clear any in-flight measurement when the user switches away.
@@ -902,6 +1192,16 @@ export default function Viewport({
         style={{ display: 'none' }}
         aria-hidden="true"
       />
+      {loadingCount > 0 && (
+        <div className="viewport-loader" role="status" aria-live="polite">
+          <div className="viewport-loader-bar">
+            <div className="viewport-loader-bar-fill" />
+          </div>
+          <span className="viewport-loader-label">
+            Loading {loadingCount} asset{loadingCount > 1 ? 's' : ''}…
+          </span>
+        </div>
+      )}
       <CameraControls view={cameraView} onChange={setCameraView} />
     </div>
   );
@@ -910,8 +1210,7 @@ export default function Viewport({
 function buildShapeMesh(
   prim: PrimNode,
   scene: Scene,
-  subMeshRegistry: Map<string, Node>,
-  onAssetMeshesLoaded: (nodes: AssetMeshNode[]) => void
+  loadReference: (parent: Mesh, assetSource: string, primId: string) => void
 ): Mesh {
   let mesh: Mesh;
   switch (prim.kind) {
@@ -954,14 +1253,7 @@ function buildShapeMesh(
       mesh = new Mesh(prim.id, scene);
       mesh.isPickable = false;
       if (prim.assetSource) {
-        void loadGltfReference(
-          mesh,
-          prim.assetSource,
-          scene,
-          prim.id,
-          subMeshRegistry,
-          onAssetMeshesLoaded
-        );
+        loadReference(mesh, prim.assetSource, prim.id);
       }
       break;
   }
@@ -1023,8 +1315,12 @@ async function loadGltfReference(
   const sourceExt = assetSource.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase();
   const pluginExtension = url.startsWith('blob:') ? sourceExt : undefined;
   try {
-    const result = await SceneLoader.ImportMeshAsync(
-      '',
+    // LoadAssetContainerAsync loads the meshes into an off-scene container
+    // so we can parent + configure them BEFORE they ever get rendered.
+    // ImportMeshAsync adds meshes to the scene immediately and would briefly
+    // render at world scale 1 (huge) before our parent reassignment applies
+    // the asset's metersPerUnit / inch->meter scale fix.
+    const container = await SceneLoader.LoadAssetContainerAsync(
       rootUrl,
       fileName,
       scene,
@@ -1033,10 +1329,10 @@ async function loadGltfReference(
     );
     // The reference prim may have been removed before the load finished.
     if (parent.isDisposed()) {
-      for (const m of result.meshes) m.dispose();
+      container.dispose();
       return;
     }
-    for (const m of result.meshes) {
+    for (const m of container.meshes) {
       if (!m.parent) m.parent = parent;
       // Tag every loaded mesh so viewport clicks resolve back to the prim.
       m.metadata = { ...(m.metadata ?? {}), primId };
@@ -1055,6 +1351,9 @@ async function loadGltfReference(
       }
       sanitizeReferenceMaterial(m.material);
     }
+    // Commit the fully-configured nodes to the scene in one atomic step,
+    // so the first frame they appear in is already correctly scaled.
+    container.addAllToScene();
     // Remember which source produced these children so a later edit triggers a reload.
     parent.metadata = { ...(parent.metadata ?? {}), primId, loadedSource: assetSource };
     // Drop any stale sub-mesh registrations from a previous load of this prim,

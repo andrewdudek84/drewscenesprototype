@@ -22,6 +22,8 @@ import {
   buildModelTree,
   buildOntology,
   DEFAULT_ENTITY_TYPE,
+  duplicateEntityInstance,
+  ensureHasUsdEdges,
   loadHospitalOntologyDoc,
   moveEntityType,
   removeModelRelationship,
@@ -81,6 +83,13 @@ export default function App() {
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
     const [prims, setPrims] = useState<PrimNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Additional prim ids selected on top of `selectedId` via Ctrl+click. The
+  // "primary" selection (gizmo target, Properties form) stays on
+  // `selectedId`; these are the secondary highlights that get carried along
+  // when the position gizmo is dragged. Always disjoint from `selectedId`.
+  const [additionalSelectedIds, setAdditionalSelectedIds] = useState<string[]>(
+    []
+  );
   // Identifies a specific sub-mesh inside a loaded reference asset when the
   // user clicks one (in the viewport or hierarchy). Null when the selection
   // is the whole prim. Always cleared when `selectedId` flips to a different
@@ -182,6 +191,23 @@ export default function App() {
     []
   );
 
+  // Batch transform writer used by the position gizmo when a group of prims
+  // is being moved together. One setPrims pass keeps the viewport scene
+  // re-render to a single commit instead of N.
+  const handleTransformMany = useCallback(
+    (updates: Array<{ id: string; t: Partial<PrimTransform> }>) => {
+      if (updates.length === 0) return;
+      const byId = new Map(updates.map((u) => [u.id, u.t] as const));
+      setPrims((prev) =>
+        prev.map((p) => {
+          const t = byId.get(p.id);
+          return t ? { ...p, ...t } : p;
+        })
+      );
+    },
+    []
+  );
+
   const handleUpdate = useCallback((id: string, patch: PrimPatch) => {
     setPrims((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }, []);
@@ -215,10 +241,12 @@ export default function App() {
     []
   );
 
-  // Delete a prim and every descendant under it.
-  const handleDelete = useCallback((id: string) => {
+  // Delete one or more prims and every descendant under each. Batched into
+  // a single setPrims pass so multi-selection delete shows up in one render.
+  const handleDeleteMany = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
     setPrims((prev) => {
-      const doomed = new Set<string>([id]);
+      const doomed = new Set<string>(ids);
       let grew = true;
       while (grew) {
         grew = false;
@@ -253,59 +281,131 @@ export default function App() {
       });
       return prev.filter((p) => !doomed.has(p.id));
     });
-    setSelectedId((cur) => (cur === id ? null : cur));
-    setSelectedMeshUid((cur) => (selectedId === id ? null : cur));
+    const doomedSet = new Set(ids);
+    setSelectedId((cur) => (cur && doomedSet.has(cur) ? null : cur));
+    setAdditionalSelectedIds((cur) => cur.filter((x) => !doomedSet.has(x)));
+    setSelectedMeshUid((cur) =>
+      selectedId && doomedSet.has(selectedId) ? null : cur
+    );
   }, [selectedId]);
 
-  // Duplicate a prim and every descendant under it. Each clone gets a fresh
-  // id; parent references inside the clone tree are rewritten so the new
-  // sub-tree mirrors the original structure. The root clone's name gets the
-  // next available `_<n>` suffix so it's visually distinct in the hierarchy.
-  const handleDuplicate = useCallback(
-    (id: string) => {
+  const handleDelete = useCallback(
+    (id: string) => handleDeleteMany([id]),
+    [handleDeleteMany]
+  );
+
+  // Duplicate one or more prims and every descendant under each. Roots in
+  // `ids` whose ancestor is also in `ids` are skipped so descendants don't
+  // get cloned twice. Each cloned root's name gets the next available
+  // `_<n>` suffix; descendants keep their original names unless taken.
+  const handleDuplicateMany = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return;
       const byId = new Map(prims.map((p) => [p.id, p] as const));
-      const root = byId.get(id);
-      if (!root) return;
+      const set = new Set(ids);
+      // Filter to independent roots so a selected parent + selected child
+      // doesn't duplicate the child twice.
+      const independent = ids.filter((id) => {
+        let cur = byId.get(id);
+        let pid = cur?.parentId ?? null;
+        while (pid) {
+          if (set.has(pid)) return false;
+          cur = byId.get(pid);
+          pid = cur?.parentId ?? null;
+        }
+        return true;
+      });
+      if (independent.length === 0) return;
       const order: PrimNode[] = [];
+      const idMap = new Map<string, string>();
+      const rootSet = new Set(independent);
       const visit = (pid: string) => {
+        if (idMap.has(pid)) return;
         const p = byId.get(pid);
         if (!p) return;
         order.push(p);
+        idMap.set(pid, newId());
         for (const child of prims) {
           if (child.parentId === pid) visit(child.id);
         }
       };
-      visit(id);
-      const idMap = new Map<string, string>();
-      for (const p of order) idMap.set(p.id, newId());
-      const newRootId = idMap.get(id)!;
+      for (const rid of independent) visit(rid);
       const existingNames = new Set(prims.map((p) => p.name));
-      const rootName = nextDuplicateName(root.name, existingNames);
-      const clones: PrimNode[] = order.map((p) => ({
-        ...p,
-        id: idMap.get(p.id)!,
-        name: p.id === id ? rootName : p.name,
-        parentId:
-          p.id === id ? p.parentId : idMap.get(p.parentId ?? '') ?? p.parentId,
-        position: [...p.position],
-        rotation: [...p.rotation],
-        scale: [...p.scale]
-      }));
+      const clones: PrimNode[] = order.map((p) => {
+        const cloneName = rootSet.has(p.id)
+          ? nextDuplicateName(p.name, existingNames)
+          : p.name;
+        if (rootSet.has(p.id)) existingNames.add(cloneName);
+        return {
+          ...p,
+          id: idMap.get(p.id)!,
+          name: cloneName,
+          parentId: rootSet.has(p.id)
+            ? p.parentId
+            : idMap.get(p.parentId ?? '') ?? p.parentId,
+          position: [...p.position],
+          rotation: [...p.rotation],
+          scale: [...p.scale]
+        };
+      });
       setPrims((prev) => [...prev, ...clones]);
-      setSelectedId(newRootId);
+      const newRootIds = independent.map((id) => idMap.get(id)!);
+      const primary = newRootIds[newRootIds.length - 1] ?? null;
+      setSelectedId(primary);
+      setAdditionalSelectedIds(primary ? newRootIds.slice(0, -1) : []);
       setSelectedMeshUid(null);
+      // Clear any lingering ontology-instance selection so the previous
+      // multi-selection in the ontology tree doesn't keep highlighting.
+      setSelectedInstanceId(null);
+      setInspectorSelection(null);
     },
     [prims]
   );
 
   const handleSelect = useCallback(
-    (id: string | null, meshUid: string | null = null) => {
+    (
+      id: string | null,
+      meshUid: string | null = null,
+      additive: boolean = false
+    ) => {
+      // Ctrl/Cmd+click toggles a prim's membership in the multi-selection
+      // without disturbing the rest. Sub-mesh selection only makes sense
+      // for a single prim, so it's force-cleared in additive mode.
+      if (additive && id) {
+        // Compute the next selection synchronously from the latest closure
+        // state. The previous version used nested setState updaters and
+        // read `nextPrimary` before the inner updater ran, silently
+        // dropping the primary on every Ctrl+click.
+        const all = selectedId
+          ? [selectedId, ...additionalSelectedIds]
+          : additionalSelectedIds;
+        let nextPrimary: string | null;
+        let nextAdditional: string[];
+        if (all.includes(id)) {
+          // Remove: keep the rest, promote the most-recent survivor.
+          const remaining = all.filter((x) => x !== id);
+          nextPrimary = remaining[remaining.length - 1] ?? null;
+          nextAdditional = remaining.slice(0, -1);
+        } else {
+          // Add: clicked id becomes the new primary, old primary drops
+          // into the additional set so the gizmo follows the latest pick.
+          nextPrimary = id;
+          nextAdditional = all;
+        }
+        setInspectorSelection(null);
+        setSelectedInstanceId(null);
+        setSelectedMeshUid(null);
+        setSelectedId(nextPrimary);
+        setAdditionalSelectedIds(nextAdditional);
+        return;
+      }
       setInspectorSelection(null);
       setSelectedInstanceId(null);
+      setAdditionalSelectedIds([]);
       setSelectedId(id);
       setSelectedMeshUid(id ? meshUid : null);
     },
-    []
+    [selectedId, additionalSelectedIds]
   );
 
   // Viewport picks always promote selection to the topmost ancestor prim
@@ -313,15 +413,19 @@ export default function App() {
   // (and outlined) when they click anything in the 3D view, regardless of
   // which leaf mesh was hit.
   const handleViewportSelect = useCallback(
-    (id: string | null) => {
+    (
+      id: string | null,
+      _meshUid: string | null = null,
+      additive: boolean = false
+    ) => {
       if (!id) {
-        handleSelect(null);
+        if (!additive) handleSelect(null);
         return;
       }
       const byId = new Map(prims.map((p) => [p.id, p] as const));
       let cur = byId.get(id);
       if (!cur) {
-        handleSelect(null);
+        if (!additive) handleSelect(null);
         return;
       }
       while (cur.parentId) {
@@ -329,9 +433,21 @@ export default function App() {
         if (!parent) break;
         cur = parent;
       }
-      handleSelect(cur.id, null);
+      handleSelect(cur.id, null, additive);
     },
     [prims, handleSelect]
+  );
+
+  // Union of `selectedId` and `additionalSelectedIds`, in the order the
+  // gizmo/outliner cares about: primary last so callers can take the tail
+  // as "the focus" when they need to pick one. Memoized to keep stable
+  // references for downstream useEffects.
+  const selectedIds = useMemo(
+    () =>
+      selectedId
+        ? [...additionalSelectedIds, selectedId]
+        : additionalSelectedIds,
+    [selectedId, additionalSelectedIds]
   );
 
   const handleAssetMeshesLoaded = useCallback(
@@ -396,6 +512,161 @@ export default function App() {
     []
   );
 
+  // ---- Undo stack (Ctrl/Cmd+Z, keeps the last 10 mutations) -----------
+  // An "action" is any change to prims, ontologyDoc, or bindings. Pure
+  // selection changes don't push a new entry, but the selection at the
+  // moment of the mutation is captured so undo restores it too. The effect
+  // pushes the *previous* data snapshot whenever data changes; the keydown
+  // handler pops and restores it.
+  interface UndoSnapshot {
+    prims: PrimNode[];
+    ontologyDoc: OntologyDoc;
+    bindings: Record<string, SpatialBinding>;
+    selectedId: string | null;
+    additionalSelectedIds: string[];
+    selectedInstanceId: string | null;
+  }
+  const UNDO_LIMIT = 10;
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
+  const lastDataRef = useRef<{
+    prims: PrimNode[];
+    ontologyDoc: OntologyDoc;
+    bindings: Record<string, SpatialBinding>;
+  } | null>(null);
+  const lastSelectionRef = useRef<{
+    selectedId: string | null;
+    additionalSelectedIds: string[];
+    selectedInstanceId: string | null;
+  }>({
+    selectedId: null,
+    additionalSelectedIds: [],
+    selectedInstanceId: null
+  });
+  const isUndoingRef = useRef(false);
+  // Set while a gizmo drag is in flight (between onBeginTransformBatch and
+  // onEndTransformBatch). During a batch the data effect skips pushing new
+  // snapshots; the single pre-drag snapshot held in batchStartSnapshotRef
+  // is handed off to pendingFlushRef when the batch closes, and the next
+  // data-effect tick pushes it once — so a multi-tick drag produces exactly
+  // one undo entry representing the pre-drag state.
+  const batchingRef = useRef(false);
+  const batchStartSnapshotRef = useRef<UndoSnapshot | null>(null);
+  // Holds a snapshot waiting to be pushed onto the undo stack by the next
+  // data-effect fire (e.g. the drag-end commit). Lets the effect collapse
+  // the drag's final commit into a single history entry without also
+  // recording the mid-drag intermediate state.
+  const pendingFlushRef = useRef<UndoSnapshot | null>(null);
+
+  useEffect(() => {
+    lastSelectionRef.current = {
+      selectedId,
+      additionalSelectedIds,
+      selectedInstanceId
+    };
+  }, [selectedId, additionalSelectedIds, selectedInstanceId]);
+
+  useEffect(() => {
+    if (isUndoingRef.current) {
+      isUndoingRef.current = false;
+      lastDataRef.current = { prims, ontologyDoc, bindings };
+      pendingFlushRef.current = null;
+      return;
+    }
+    if (batchingRef.current) {
+      // Still in a gizmo drag — just track the latest data without
+      // recording a history entry per tick.
+      lastDataRef.current = { prims, ontologyDoc, bindings };
+      return;
+    }
+    // Decide what to push. If a batch just ended, use the snapshot it
+    // captured (pre-drag); otherwise capture the previous data + selection.
+    const snapshot =
+      pendingFlushRef.current ??
+      (lastDataRef.current
+        ? { ...lastDataRef.current, ...lastSelectionRef.current }
+        : null);
+    pendingFlushRef.current = null;
+    if (snapshot) {
+      // Only push when data actually changed; reference equality is enough
+      // because every mutation produces a new array/object.
+      const changed =
+        snapshot.prims !== prims ||
+        snapshot.ontologyDoc !== ontologyDoc ||
+        snapshot.bindings !== bindings;
+      if (changed) {
+        undoStackRef.current.push(snapshot);
+        if (undoStackRef.current.length > UNDO_LIMIT) {
+          undoStackRef.current.shift();
+        }
+      }
+    }
+    lastDataRef.current = { prims, ontologyDoc, bindings };
+  }, [prims, ontologyDoc, bindings]);
+
+  const handleBeginTransformBatch = useCallback(() => {
+    if (batchingRef.current) return;
+    batchingRef.current = true;
+    if (lastDataRef.current) {
+      batchStartSnapshotRef.current = {
+        ...lastDataRef.current,
+        ...lastSelectionRef.current
+      };
+    }
+  }, []);
+
+  const handleEndTransformBatch = useCallback(() => {
+    if (!batchingRef.current) return;
+    batchingRef.current = false;
+    // Hand the pre-drag snapshot to the data effect; it will push it once,
+    // but only if the drag-end commit produced an actual data change.
+    pendingFlushRef.current = batchStartSnapshotRef.current;
+    batchStartSnapshotRef.current = null;
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    const snap = undoStackRef.current.pop();
+    if (!snap) return;
+    isUndoingRef.current = true;
+    setPrims(snap.prims);
+    setOntologyDoc(snap.ontologyDoc);
+    setBindings(snap.bindings);
+    setSelectedId(snap.selectedId);
+    setAdditionalSelectedIds(snap.additionalSelectedIds);
+    setSelectedInstanceId(snap.selectedInstanceId);
+    setSelectedMeshUid(null);
+    setSubMeshInfo(null);
+    setInspectorSelection(null);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const isUndo =
+        (ev.ctrlKey || ev.metaKey) &&
+        !ev.shiftKey &&
+        !ev.altKey &&
+        (ev.key === 'z' || ev.key === 'Z');
+      if (!isUndo) return;
+      // Don't hijack Ctrl+Z while the user is editing text in an input
+      // field — let the browser's native input undo handle it instead.
+      const t = ev.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          (t as HTMLElement).isContentEditable
+        ) {
+          return;
+        }
+      }
+      ev.preventDefault();
+      handleUndo();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleUndo]);
+
   // Reverse index: primId -> the SpatialItem entity it is bound to. Keyed by
   // the bound group's prim id (`binding.guid`) so the green-check indicator
   // and the Properties "Mapped" row appear on the asset's top-level wrapper
@@ -440,6 +711,24 @@ export default function App() {
     [ontologyDoc]
   );
 
+  // Multi-selection projected onto the Ontology panel: each selected prim's
+  // bound entity, collapsed up to its visible parent row (USD children are
+  // hidden in the panel). Includes selectedInstanceId so entity-only picks
+  // also show as highlighted. Deduped for downstream `.includes` checks.
+  const selectedEntityIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const pid of selectedIds) {
+      const eid = entityIdByPrimId.get(pid);
+      const visible = collapseUsdChildToParent(eid ?? null);
+      if (visible) ids.add(visible);
+    }
+    if (selectedInstanceId) {
+      const visible = collapseUsdChildToParent(selectedInstanceId);
+      if (visible) ids.add(visible);
+    }
+    return Array.from(ids);
+  }, [selectedIds, selectedInstanceId, entityIdByPrimId, collapseUsdChildToParent]);
+
   // Inverse lookup used when the user clicks a SpatialItem row: bring focus
   // to the bound group prim so the viewport gizmo + Properties panel update.
   const primIdByEntityId = useMemo(() => {
@@ -449,9 +738,8 @@ export default function App() {
   }, [bindings]);
 
   const handleSelectOntologyEntity = useCallback(
-    (entityId: string) => {
+    (entityId: string, additive: boolean = false) => {
       setInspectorSelection(null);
-      setSelectedInstanceId(entityId);
       let primId = primIdByEntityId.get(entityId);
       if (!primId) {
         // Parent rows have no prim of their own; fall back to the bound prim
@@ -462,6 +750,19 @@ export default function App() {
         )?.target;
         if (usdChildId) primId = primIdByEntityId.get(usdChildId);
       }
+      if (additive) {
+        // Ctrl/Cmd+click on an instance row: route through the shared
+        // multi-select toggle when there's an underlying prim, so the gizmo
+        // picks up the addition. Entities with no bound prim can't join the
+        // group move; we still surface them as the Properties focus.
+        if (primId) {
+          handleSelect(primId, null, true);
+        }
+        setSelectedInstanceId(entityId);
+        return;
+      }
+      setSelectedInstanceId(entityId);
+      setAdditionalSelectedIds([]);
       if (primId) {
         setSelectedId(primId);
         setSelectedMeshUid(null);
@@ -470,7 +771,7 @@ export default function App() {
         setSelectedMeshUid(null);
       }
     },
-    [primIdByEntityId, ontologyDoc]
+    [primIdByEntityId, ontologyDoc, handleSelect]
   );
 
   // Resolves a prim id to an ontology binding. Walks up the parent chain so
@@ -515,9 +816,17 @@ export default function App() {
     // so the saved file captures both the 3D scene and the entity\u2194asset map.
     const usda = exportToUsda(prims, sceneName);
     const primPoseById = new Map(
-      prims.map((p) => [p.id, { position: p.position, rotation: p.rotation }] as const)
+      prims.map(
+        (p) =>
+          [
+            p.id,
+            { position: p.position, rotation: p.rotation, scale: p.scale }
+          ] as const
+      )
     );
-    const ontologyOut = applyBindingsToOntology(ontologyDoc, bindings, primPoseById);
+    const primParentById = new Map(prims.map((p) => [p.id, p.parentId] as const));
+    let ontologyOut = applyBindingsToOntology(ontologyDoc, bindings, primPoseById);
+    ontologyOut = ensureHasUsdEdges(ontologyOut, bindings, primParentById);
     const payload = { Scene: usda, Ontology: ontologyOut };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json;charset=utf-8'
@@ -760,20 +1069,27 @@ export default function App() {
 
   const handleContextMenu = useCallback(
     (primId: string, x: number, y: number) => {
+      // If the right-clicked prim is part of the current multi-selection,
+      // operate on the whole selection; otherwise just on the clicked one.
+      const targetIds = selectedIds.includes(primId) ? selectedIds : [primId];
+      const n = targetIds.length;
       setMenu({
         x,
         y,
         items: [
-          { label: 'Duplicate', onClick: () => handleDuplicate(primId) },
           {
-            label: 'Delete',
+            label: n > 1 ? `Duplicate (${n})` : 'Duplicate',
+            onClick: () => handleDuplicateMany(targetIds)
+          },
+          {
+            label: n > 1 ? `Delete (${n})` : 'Delete',
             destructive: true,
-            onClick: () => handleDelete(primId)
+            onClick: () => handleDeleteMany(targetIds)
           }
         ]
       });
     },
-    [handleDuplicate, handleDelete]
+    [selectedIds, handleDuplicateMany, handleDeleteMany]
   );
 
   // ---------- Ontology mutation handlers ----------
@@ -1201,6 +1517,166 @@ export default function App() {
     [ontologyDoc, bindings, spawnFromModelUsd]
   );
 
+  // Duplicate an entity instance and all of its descendants (HasChild + HasUSD).
+  // Bound USD entities also get their underlying prim subtree cloned and a
+  // fresh binding wired up to the new entity. Root duplicate name uses the
+  // `_<n>` suffix scheme; child names are uniquified individually.
+  const handleDuplicateInstancesMany = useCallback(
+    (entityIds: string[]) => {
+      if (entityIds.length === 0) return;
+      let doc = ontologyDoc;
+      const primById = new Map(prims.map((p) => [p.id, p] as const));
+      const primNameTaken = new Set(prims.map((p) => p.name));
+      const allClonedPrims: PrimNode[] = [];
+      const allNewBindings: Record<string, SpatialBinding> = {};
+      const newRootIds: string[] = [];
+
+      for (const entityId of entityIds) {
+        const result = duplicateEntityInstance(doc, entityId);
+        if (!result) continue;
+        const { doc: nextDoc, newRootId, idMap } = result;
+        doc = nextDoc;
+        newRootIds.push(newRootId);
+
+        const primsToClone = new Set<string>();
+        const collectPrimAndDescendants = (pid: string) => {
+          if (primsToClone.has(pid) || !primById.has(pid)) return;
+          primsToClone.add(pid);
+          for (const child of prims) {
+            if (child.parentId === pid) collectPrimAndDescendants(child.id);
+          }
+        };
+        for (const oldEntityId of idMap.keys()) {
+          const b = bindings[oldEntityId];
+          if (b?.guid) collectPrimAndDescendants(b.guid);
+        }
+
+        const primIdMap = new Map<string, string>();
+        for (const pid of primsToClone) primIdMap.set(pid, newId());
+
+        const localCloned: PrimNode[] = [];
+        for (const oldPid of primsToClone) {
+          const src = primById.get(oldPid);
+          if (!src) continue;
+          const cloneName = primNameTaken.has(src.name)
+            ? nextDuplicateName(src.name, primNameTaken)
+            : src.name;
+          primNameTaken.add(cloneName);
+          localCloned.push({
+            ...src,
+            id: primIdMap.get(oldPid)!,
+            name: cloneName,
+            parentId:
+              src.parentId && primIdMap.has(src.parentId)
+                ? primIdMap.get(src.parentId)!
+                : src.parentId,
+            position: [...src.position],
+            rotation: [...src.rotation],
+            scale: [...src.scale]
+          });
+        }
+
+        for (const [oldEntityId, newEntityId] of idMap) {
+          const b = bindings[oldEntityId];
+          if (!b) continue;
+          const newGuid = primIdMap.get(b.guid);
+          if (!newGuid) continue;
+          const newEntity = doc.instances.entities.find(
+            (e) => e.id === newEntityId
+          );
+          allNewBindings[newEntityId] = {
+            guid: newGuid,
+            usd: b.usd,
+            name: newEntity?.name ?? b.name
+          };
+          const clone = localCloned.find((p) => p.id === newGuid);
+          if (clone && newEntity) clone.name = newEntity.name;
+        }
+        allClonedPrims.push(...localCloned);
+      }
+
+      setOntologyDoc(doc);
+      if (allClonedPrims.length > 0) {
+        setPrims((prev) => [...prev, ...allClonedPrims]);
+      }
+      if (Object.keys(allNewBindings).length > 0) {
+        setBindings((cur) => ({ ...cur, ...allNewBindings }));
+      }
+      // Replace the previous selection with the newly-cloned roots so the
+      // user can immediately keep operating on them (and the old originals
+      // are no longer multi-selected). For bound roots we route through
+      // the prim selection so the viewport gizmo follows; selectedInstanceId
+      // tracks the last new root so unbound roots still highlight in the
+      // ontology tree.
+      const newBoundPrimIds = newRootIds
+        .map((rid) => allNewBindings[rid]?.guid)
+        .filter((g): g is string => Boolean(g));
+      const lastRoot = newRootIds[newRootIds.length - 1] ?? null;
+      if (newBoundPrimIds.length > 0) {
+        const primary = newBoundPrimIds[newBoundPrimIds.length - 1];
+        setSelectedId(primary);
+        setAdditionalSelectedIds(newBoundPrimIds.slice(0, -1));
+      } else {
+        setSelectedId(null);
+        setAdditionalSelectedIds([]);
+      }
+      setSelectedMeshUid(null);
+      setSubMeshInfo(null);
+      setInspectorSelection(null);
+      setSelectedInstanceId(lastRoot);
+    },
+    [ontologyDoc, bindings, prims]
+  );
+
+  const handleDeleteInstancesMany = useCallback(
+    (entityIds: string[]) => {
+      if (entityIds.length === 0) return;
+      // Walk HasChild + HasUSD edges to collect the full doomed set of
+      // entity ids, then drop their prims and bindings in lockstep.
+      const rels = ontologyDoc.instances.relationships;
+      const doomed = new Set<string>(entityIds);
+      const stack = [...entityIds];
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        for (const r of rels) {
+          if (
+            (r.type === 'HasChild' || r.type === 'HasUSD') &&
+            r.source === cur &&
+            !doomed.has(r.target)
+          ) {
+            doomed.add(r.target);
+            stack.push(r.target);
+          }
+        }
+      }
+      const primIdsToDelete: string[] = [];
+      for (const eid of doomed) {
+        const b = bindings[eid];
+        if (b?.guid) primIdsToDelete.push(b.guid);
+      }
+      setOntologyDoc((cur) => {
+        let next = cur;
+        for (const eid of entityIds) next = removeEntityInstance(next, eid);
+        return next;
+      });
+      setBindings((cur) => {
+        let next = cur;
+        for (const eid of doomed) {
+          if (eid in next) {
+            if (next === cur) next = { ...cur };
+            delete next[eid];
+          }
+        }
+        return next;
+      });
+      if (primIdsToDelete.length > 0) handleDeleteMany(primIdsToDelete);
+      if (selectedInstanceId && doomed.has(selectedInstanceId)) {
+        setSelectedInstanceId(null);
+      }
+    },
+    [ontologyDoc, bindings, handleDeleteMany, selectedInstanceId]
+  );
+
   const handleCommitInstanceRename = useCallback(
     (id: string, newName: string) => {
       const trimmed = newName.trim();
@@ -1336,6 +1812,12 @@ export default function App() {
         (e) => e.id === entityId
       );
       const parentTypeName = parentEntity?.type ?? null;
+      // If the right-clicked entity is part of the current multi-selection,
+      // operate on the whole selection; otherwise just on the clicked one.
+      const targetIds = selectedEntityIds.includes(entityId)
+        ? selectedEntityIds
+        : [entityId];
+      const n = targetIds.length;
       setMenu({
         x,
         y,
@@ -1348,54 +1830,25 @@ export default function App() {
           },
           { label: 'Rename', onClick: () => setEditingInstanceId(entityId) },
           {
-            label: 'Delete',
+            label: n > 1 ? `Duplicate (${n})` : 'Duplicate',
+            onClick: () => handleDuplicateInstancesMany(targetIds)
+          },
+          {
+            label: n > 1 ? `Delete (${n})` : 'Delete',
             destructive: true,
-            onClick: () => {
-              // Collect this entity + all descendants reached via
-              // HasChild/HasUSD, so we can drop their viewport prims
-              // and bindings in lockstep with the ontology mutation.
-              const rels = ontologyDoc.instances.relationships;
-              const doomed = new Set<string>([entityId]);
-              const stack = [entityId];
-              while (stack.length > 0) {
-                const cur = stack.pop()!;
-                for (const r of rels) {
-                  if (
-                    (r.type === 'HasChild' || r.type === 'HasUSD') &&
-                    r.source === cur &&
-                    !doomed.has(r.target)
-                  ) {
-                    doomed.add(r.target);
-                    stack.push(r.target);
-                  }
-                }
-              }
-              const primIdsToDelete: string[] = [];
-              for (const eid of doomed) {
-                const b = bindings[eid];
-                if (b?.guid) primIdsToDelete.push(b.guid);
-              }
-              setOntologyDoc((cur) => removeEntityInstance(cur, entityId));
-              setBindings((cur) => {
-                let next = cur;
-                for (const eid of doomed) {
-                  if (eid in next) {
-                    if (next === cur) next = { ...cur };
-                    delete next[eid];
-                  }
-                }
-                return next;
-              });
-              for (const pid of primIdsToDelete) handleDelete(pid);
-              if (selectedInstanceId && doomed.has(selectedInstanceId)) {
-                setSelectedInstanceId(null);
-              }
-            }
+            onClick: () => handleDeleteInstancesMany(targetIds)
           }
         ]
       });
     },
-    [buildTypePickerSubmenu, addInstanceOfType, ontologyDoc, bindings, handleDelete, selectedInstanceId]
+    [
+      buildTypePickerSubmenu,
+      addInstanceOfType,
+      handleDuplicateInstancesMany,
+      handleDeleteInstancesMany,
+      ontologyDoc,
+      selectedEntityIds
+    ]
   );
 
   return (
@@ -1413,6 +1866,7 @@ export default function App() {
           prims={prims}
           tool={tool}
           selectedId={selectedId}
+          selectedIds={selectedIds}
           selectedMeshUid={selectedMeshUid}
           theme={theme}
           focusSignal={focusSignal}
@@ -1421,9 +1875,12 @@ export default function App() {
           onAssetDropped={handleAssetDropped}
           onSelect={handleViewportSelect}
           onTransform={handleTransform}
+          onTransformMany={handleTransformMany}
           onAssetMeshesLoaded={handleAssetMeshesLoaded}
           onSubMeshInfoChange={setSubMeshInfo}
           onContextMenu={handleContextMenu}
+          onBeginTransformBatch={handleBeginTransformBatch}
+          onEndTransformBatch={handleEndTransformBatch}
         />
         <LeftToolbar
           tool={tool}
@@ -1438,6 +1895,7 @@ export default function App() {
       <HierarchyPanel
         prims={prims}
         selectedId={selectedId}
+        selectedIds={selectedIds}
         selectedMeshUid={selectedMeshUid}
         assetMeshes={assetMeshes}
         mappedByPrimId={mappedByPrimId}
@@ -1498,6 +1956,7 @@ export default function App() {
           roots={ontology.roots}
           bindings={bindings}
           selectedEntityId={collapseUsdChildToParent(selectedInstanceId ?? selectedEntityId)}
+          selectedEntityIds={selectedEntityIds}
           onBind={handleBind}
           onSelectEntity={handleSelectOntologyEntity}
           resolvePrimAsAsset={resolvePrimAsAsset}

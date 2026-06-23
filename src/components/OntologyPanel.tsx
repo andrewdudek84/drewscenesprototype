@@ -23,10 +23,17 @@ interface Props {
    *  via the prim<->entity binding map). Used to highlight the bound
    *  USD node when the user picks the asset in the viewport/hierarchy. */
   selectedEntityId: string | null;
+  /** Full multi-selection set of entity ids (always includes
+   *  `selectedEntityId` when set). Secondary entries get the lighter
+   *  `is-multi-selected` highlight so the user can see what Ctrl+click
+   *  added without losing track of the gizmo's primary target. */
+  selectedEntityIds: string[];
   onBind: (entityId: string, binding: SpatialBinding) => void;
   /** Fires when the user clicks a bound USD row, so App can flip
-   *  selection over to the bound prim (driving viewport gizmo + properties). */
-  onSelectEntity: (entityId: string) => void;
+   *  selection over to the bound prim (driving viewport gizmo + properties).
+   *  `additive` (Ctrl/Cmd+click) toggles the row into the multi-selection
+   *  instead of replacing it. */
+  onSelectEntity: (entityId: string, additive?: boolean) => void;
   /** Returns asset binding info if the dragged prim is (or descends from) an
    *  Asset-kind group spawned from the library; otherwise null. */
   resolvePrimAsAsset: (primId: string) => {
@@ -58,6 +65,7 @@ export default function OntologyPanel({
   roots,
   bindings,
   selectedEntityId,
+  selectedEntityIds,
   onBind,
   onSelectEntity,
   resolvePrimAsAsset,
@@ -187,6 +195,7 @@ export default function OntologyPanel({
                 node={n}
                 bindings={bindings}
                 selectedEntityId={selectedEntityId}
+                selectedEntityIds={selectedEntityIds}
                 resolvePrimAsAsset={resolvePrimAsAsset}
                 onBind={onBind}
                 onSelectEntity={onSelectEntity}
@@ -198,6 +207,7 @@ export default function OntologyPanel({
                 canReparent={canReparent}
                 dragRef={dragRef}
                 descendantsById={descendantsById}
+                depth={0}
               />
             ))
           )}
@@ -216,9 +226,10 @@ interface NodeProps {
   node: OntologyNode;
   bindings: Record<string, SpatialBinding>;
   selectedEntityId: string | null;
+  selectedEntityIds: string[];
   resolvePrimAsAsset: Props['resolvePrimAsAsset'];
   onBind: (entityId: string, binding: SpatialBinding) => void;
-  onSelectEntity: (entityId: string) => void;
+  onSelectEntity: (entityId: string, additive?: boolean) => void;
   onContextMenu: (entityId: string | null, x: number, y: number) => void;
   editingId: string | null;
   onCommitRename: (entityId: string, newName: string) => void;
@@ -227,12 +238,17 @@ interface NodeProps {
   canReparent: (entityId: string, newParentId: string | null) => boolean;
   dragRef: React.MutableRefObject<InstanceDragInfo | null>;
   descendantsById: Map<string, Set<string>>;
+  /** Depth in the tree. Root rows are 0; their children 1, etc. Used to
+   * default-expand only the root rows so duplicates and deep trees don't
+   * blow open on first render. */
+  depth: number;
 }
 
 function OntologyTreeNode({
   node,
   bindings,
   selectedEntityId,
+  selectedEntityIds,
   resolvePrimAsAsset,
   onBind,
   onSelectEntity,
@@ -243,14 +259,17 @@ function OntologyTreeNode({
   onReparent,
   canReparent,
   dragRef,
-  descendantsById
+  descendantsById,
+  depth
 }: NodeProps) {
   const hasChildren = node.children.length > 0;
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(depth === 0);
   const [dragOver, setDragOver] = useState(false);
   const [shake, setShake] = useState(false);
   const isSpatial = node.entity.type === 'USD';
   const isSelected = selectedEntityId === node.entity.id;
+  const isInMultiSelection =
+    !isSelected && selectedEntityIds.includes(node.entity.id);
   const isEditing = editingId === node.entity.id;
   // All instance rows are clickable: clicking routes through App, which
   // shows the entity's properties form and (for bound USD rows) also
@@ -259,7 +278,7 @@ function OntologyTreeNode({
   const onClick = (ev: React.MouseEvent) => {
     if (!canSelect) return;
     ev.stopPropagation();
-    onSelectEntity(node.entity.id);
+    onSelectEntity(node.entity.id, ev.ctrlKey || ev.metaKey);
   };
 
   const onInstanceDragStart = (ev: React.DragEvent) => {
@@ -347,6 +366,7 @@ function OntologyTreeNode({
           'tree-node' +
           (dragOver ? ' is-drop-target' : '') +
           (isSelected ? ' is-selected' : '') +
+          (isInMultiSelection ? ' is-multi-selected' : '') +
           (canSelect ? '' : ' is-non-selectable') +
           (shake ? ' is-shake-no' : '')
         }
@@ -405,6 +425,7 @@ function OntologyTreeNode({
               node={c}
               bindings={bindings}
               selectedEntityId={selectedEntityId}
+              selectedEntityIds={selectedEntityIds}
               resolvePrimAsAsset={resolvePrimAsAsset}
               onBind={onBind}
               onSelectEntity={onSelectEntity}
@@ -416,6 +437,7 @@ function OntologyTreeNode({
               canReparent={canReparent}
               dragRef={dragRef}
               descendantsById={descendantsById}
+              depth={depth + 1}
             />
           ))}
         </ul>

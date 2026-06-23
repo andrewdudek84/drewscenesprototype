@@ -9,6 +9,7 @@ export interface OntologyEntity {
   name: string;
   position?: { x: number; y: number; z: number };
   rotation?: { x: number; y: number; z: number };
+  scale?: { x: number; y: number; z: number };
   usd?: string;
   topic?: string;
   /** Prim id of the bound scene object. Empty/absent when unbound. Written
@@ -34,6 +35,7 @@ export interface OntologyEntityType {
   description?: string;
   position?: { x: number; y: number; z: number };
   rotation?: { x: number; y: number; z: number };
+  scale?: { x: number; y: number; z: number };
   /** Path to a USD asset (shape or asset) that visually represents this
    *  entity type. Edited via the dashed drop zone in the Properties panel —
    *  drop a shape or asset from the palettes to set it. */
@@ -211,7 +213,14 @@ export function loadHospitalOntology(): {
 export function applyBindingsToOntology(
   doc: OntologyDoc,
   bindings: Record<string, SpatialBinding>,
-  primPoseById?: Map<string, { position: [number, number, number]; rotation: [number, number, number] }>
+  primPoseById?: Map<
+    string,
+    {
+      position: [number, number, number];
+      rotation: [number, number, number];
+      scale: [number, number, number];
+    }
+  >
 ): OntologyDoc {
   const clone = JSON.parse(JSON.stringify(doc)) as OntologyDoc;
   for (const e of clone.instances.entities) {
@@ -223,6 +232,7 @@ export function applyBindingsToOntology(
       if (pose) {
         e.position = { x: pose.position[0], y: pose.position[1], z: pose.position[2] };
         e.rotation = { x: pose.rotation[0], y: pose.rotation[1], z: pose.rotation[2] };
+        e.scale = { x: pose.scale[0], y: pose.scale[1], z: pose.scale[2] };
       }
     } else if ('guid' in e || 'usd' in e) {
       if (e.usd) e.usd = '';
@@ -230,6 +240,46 @@ export function applyBindingsToOntology(
     }
   }
   return clone;
+}
+
+/** Make sure every bound spatial entity has an incoming `HasUSD` edge from
+ *  whatever parent entity is closest to it in the viewport hierarchy. If the
+ *  bound prim's nearest bound ancestor is entity `A`, we ensure the doc
+ *  contains `{ type: 'HasUSD', source: A, target: <this entity> }`. Entities
+ *  that already have an incoming HasUSD edge are left alone. */
+export function ensureHasUsdEdges(
+  doc: OntologyDoc,
+  bindings: Record<string, SpatialBinding>,
+  primParentById: Map<string, string | null>
+): OntologyDoc {
+  const next = cloneDoc(doc);
+  const rels = next.instances.relationships;
+  const hasIncoming = new Set(
+    rels.filter((r) => r.type === 'HasUSD').map((r) => r.target)
+  );
+  const entityByGuid = new Map<string, string>();
+  for (const [eid, b] of Object.entries(bindings)) entityByGuid.set(b.guid, eid);
+
+  for (const [entityId, binding] of Object.entries(bindings)) {
+    if (hasIncoming.has(entityId)) continue;
+    let cur = primParentById.get(binding.guid) ?? null;
+    const seen = new Set<string>();
+    let parentEntityId: string | null = null;
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      const candidate = entityByGuid.get(cur);
+      if (candidate && candidate !== entityId) {
+        parentEntityId = candidate;
+        break;
+      }
+      cur = primParentById.get(cur) ?? null;
+    }
+    if (parentEntityId) {
+      rels.push({ type: 'HasUSD', source: parentEntityId, target: entityId });
+      hasIncoming.add(entityId);
+    }
+  }
+  return next;
 }
 
 // ---------- Mutations ----------
@@ -606,6 +656,40 @@ function uniqueInstanceName(base: string, taken: Set<string>): string {
   return candidate;
 }
 
+// Keys that have first-class handling on entity types and instances. Anything
+// else on a type is treated as a "custom property" by the Properties panel
+// (`toStringProps`); we copy those primitive values onto new instances so
+// model-level defaults flow through to every spawned instance.
+const TYPE_RESERVED_KEYS = new Set([
+  'name',
+  'description',
+  'position',
+  'rotation',
+  'usd',
+  'topic',
+  'guid'
+]);
+const ENTITY_RESERVED_KEYS = new Set([
+  'id',
+  'type',
+  'name',
+  'position',
+  'rotation',
+  'usd',
+  'topic',
+  'guid'
+]);
+
+function copyTypeCustomProps(type: OntologyEntityType, entity: OntologyEntity): void {
+  const target = entity as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(type as unknown as Record<string, unknown>)) {
+    if (TYPE_RESERVED_KEYS.has(k) || ENTITY_RESERVED_KEYS.has(k)) continue;
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'object') continue;
+    target[k] = v;
+  }
+}
+
 /** Create a new instance of `type` (optionally under `parentId` via a
  *  `HasChild` or `HasUSD` edge). Returns the new doc plus the generated
  *  entity id so callers can immediately select/focus it. */
@@ -632,13 +716,15 @@ export function addEntityInstance(
   if (type === 'USD') {
     entity.position = { x: 0, y: 0, z: 0 };
     entity.rotation = { x: 0, y: 0, z: 0 };
+    entity.scale = { x: 1, y: 1, z: 1 };
     entity.usd = '';
     entity.topic = '';
     entity.guid = '';
   }
+  const ownType = model.entityTypes.find((t) => t.name === type);
+  if (ownType) copyTypeCustomProps(ownType, entity);
   next.instances.entities.push(entity);
 
-  const ownType = model.entityTypes.find((t) => t.name === type);
   const modelUsd = (ownType?.usd ?? '').trim();
   const usdRel = modelRels.find(
     (r) => r.type === 'HasUSD' && r.source === type
@@ -654,10 +740,13 @@ export function addEntityInstance(
       name: uniqueInstanceName(`${entity.name} USD`, spatialTaken),
       position: { x: 0, y: 0, z: 0 },
       rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
       usd: modelUsd,
       topic: '',
       guid: ''
     };
+    const spatialTypeDef = model.entityTypes.find((t) => t.name === usdType);
+    if (spatialTypeDef) copyTypeCustomProps(spatialTypeDef, spatial);
     next.instances.entities.push(spatial);
     next.instances.relationships.push({
       type: 'HasUSD',
@@ -676,6 +765,104 @@ export function addEntityInstance(
     }
   }
   return { doc: next, id, spatialId, usd: modelUsd || undefined };
+}
+
+/** Duplicate an entity instance and every descendant reached via HasChild /
+ *  HasUSD. The new root keeps the same parent edge (HasChild or HasUSD) it
+ *  had in the original tree, and its name gets the next free `_<n>` suffix
+ *  (resuming the counter when the source name already ends in `_<n>`).
+ *  Descendant names are uniquified against the existing set. Internal
+ *  HasChild / HasUSD edges within the subtree are remapped to the clones.
+ *  Returns the new doc, the new root id, and an old-id -> new-id map so
+ *  callers can mirror the clone in side state (e.g. bindings). */
+export function duplicateEntityInstance(
+  doc: OntologyDoc,
+  rootId: string
+): { doc: OntologyDoc; newRootId: string; idMap: Map<string, string> } | null {
+  const byId = new Map(doc.instances.entities.map((e) => [e.id, e] as const));
+  const root = byId.get(rootId);
+  if (!root) return null;
+
+  const order: OntologyEntity[] = [];
+  const seen = new Set<string>();
+  const visit = (eid: string) => {
+    if (seen.has(eid)) return;
+    const e = byId.get(eid);
+    if (!e) return;
+    seen.add(eid);
+    order.push(e);
+    for (const r of doc.instances.relationships) {
+      if (
+        (r.type === 'HasChild' || r.type === 'HasUSD') &&
+        r.source === eid &&
+        byId.has(r.target)
+      ) {
+        visit(r.target);
+      }
+    }
+  };
+  visit(rootId);
+
+  const next = cloneDoc(doc);
+  const taken = new Set(next.instances.entities.map((e) => e.name));
+  const idMap = new Map<string, string>();
+  for (const e of order) {
+    const newId = `${e.type
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')}-${Math.random().toString(36).slice(2, 8)}`;
+    idMap.set(e.id, newId);
+  }
+
+  for (const e of order) {
+    const clone = JSON.parse(JSON.stringify(e)) as OntologyEntity;
+    clone.id = idMap.get(e.id)!;
+    const desiredName =
+      e.id === rootId
+        ? nextDuplicateInstanceName(e.name, taken)
+        : uniqueInstanceName(e.name, taken);
+    clone.name = desiredName;
+    taken.add(desiredName);
+    next.instances.entities.push(clone);
+  }
+
+  for (const r of doc.instances.relationships) {
+    if (r.type !== 'HasChild' && r.type !== 'HasUSD') continue;
+    if (idMap.has(r.source) && idMap.has(r.target)) {
+      const cloneRel: OntologyRelationship = {
+        type: r.type,
+        source: idMap.get(r.source)!,
+        target: idMap.get(r.target)!
+      };
+      if (r.usd !== undefined) cloneRel.usd = r.usd;
+      next.instances.relationships.push(cloneRel);
+    } else if (r.target === rootId && !idMap.has(r.source)) {
+      const parentRel: OntologyRelationship = {
+        type: r.type,
+        source: r.source,
+        target: idMap.get(rootId)!
+      };
+      if (r.usd !== undefined) parentRel.usd = r.usd;
+      next.instances.relationships.push(parentRel);
+    }
+  }
+
+  return { doc: next, newRootId: idMap.get(rootId)!, idMap };
+}
+
+/** Pick the next free `<base>_<n>` for a duplicate, resuming the counter when
+ *  the source name already ends in `_<n>`. Always advances past `name`
+ *  itself, unlike `uniqueInstanceName` which would return `name` unchanged
+ *  if it weren't taken. */
+function nextDuplicateInstanceName(name: string, taken: Set<string>): string {
+  const m = /^(.*)_(\d+)$/.exec(name);
+  const base = m ? m[1] : name;
+  let n = m ? Number(m[2]) + 1 : 1;
+  let candidate = `${base}_${n}`;
+  while (taken.has(candidate)) {
+    n += 1;
+    candidate = `${base}_${n}`;
+  }
+  return candidate;
 }
 
 export function renameEntityInstance(
