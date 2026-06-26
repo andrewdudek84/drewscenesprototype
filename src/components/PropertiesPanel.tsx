@@ -4,7 +4,15 @@ import type {
   OntologyEntityType,
   OntologyRelationship
 } from '../ontology';
-import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
+import type { Condition, ConditionIcon, ViewRule, ViewRuleKind } from '../conditions';
+import {
+  CONDITION_ICONS,
+  CONDITION_ICON_LABELS,
+  DEFAULT_CONDITION_COLOR,
+  createViewRule
+} from '../conditions';
+import { ConditionIconChip } from './ConditionIcons';
+import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME, PRIM_DRAG_MIME, decodeDragIds } from '../shapes';
 import { AssetIcon } from './AssetsPalette';
 import NumericInput from './NumericInput';
 import type { PrimNode, PrimPatch, ShapeKind, SubMeshInfo } from '../types';
@@ -46,6 +54,28 @@ interface Props {
     id: string,
     patch: Partial<Omit<OntologyEntity, 'id' | 'type'>>
   ) => void;
+  /** Drop-zone helper: resolves a dragged scene prim id to a USDA path so the
+   *  USD drop zone can accept drags from the Hierarchy panel (in addition to
+   *  Shapes and Assets palettes). Returns the same `/usd_shapes` or
+   *  `/usd_assets` path the palette drops would produce. Null when the prim
+   *  doesn't map to a library asset/shape. */
+  resolvePrimAsUsd: (primId: string) => string | null;
+  /** Drop-zone helper for PRIM drops onto the USD box of an instance or USD
+   *  child entity. Unlike `resolvePrimAsUsd` (which just yields a USDA path),
+   *  this rebinds the entity's USD child to the *actual* dragged prim and
+   *  deletes the previously-bound prim. Receives the target entity id and
+   *  the dragged prim id. */
+  onRebindUsdPrim: (targetEntityId: string, sourcePrimId: string) => void;
+  /** Selected Scene Editor condition, if any. When set its form takes
+   *  priority over every other selection — condition editing must stay
+   *  enabled even in scene-editor mode, so `App` also passes `readOnly=false`
+   *  in that case. */
+  condition: Condition | null;
+  onUpdateCondition: (id: string, patch: Partial<Omit<Condition, 'id'>>) => void;
+  /** When true the form is rendered inside a disabled `<fieldset>` so every
+   *  input, button, and select inside becomes inert. Used by Scene Editor
+   *  mode to surface ontology / prim properties without authoring. */
+  readOnly?: boolean;
 }
 
 const AXES: Array<{ key: 'x' | 'y' | 'z'; index: 0 | 1 | 2 }> = [
@@ -80,47 +110,64 @@ export default function PropertiesPanel({
   onRenameModelType,
   onUpdateModelType,
   onUpdateModelRelationship,
-  onUpdateEntityInstance
+  onUpdateEntityInstance,
+  resolvePrimAsUsd,
+  onRebindUsdPrim,
+  condition,
+  onUpdateCondition,
+  readOnly = false
 }: Props) {
   // Floating overlay: nothing to edit -> render nothing so the viewport gets
   // the full area. (The panel itself is absolutely positioned by CSS.)
   const hasSelection =
-    !!subMesh || !!entityInstance || !!prim || !!modelType || !!modelRelationship;
+    !!condition ||
+    !!subMesh ||
+    !!entityInstance ||
+    !!prim ||
+    !!modelType ||
+    !!modelRelationship;
   if (!hasSelection) return null;
 
   return (
     <aside className="panel properties">
       <header className="panel-header">Properties</header>
       <div className="panel-body">
-        {subMesh ? (
-          <SubMeshForm subMesh={subMesh} />
-        ) : entityInstance ? (
-          <EntityInstanceForm
-            entity={entityInstance}
-            usdChild={entityUsdChild}
-            usdChildGuid={entityUsdChildGuid}
-            usdChildPrim={entityUsdChildPrim}
-            onUpdate={onUpdateEntityInstance}
-            onUpdatePrim={onUpdate}
-          />
-        ) : prim ? (
-          <Form prim={prim} mappedTo={mappedTo} onUpdate={onUpdate} />
-        ) : modelType ? (
-          <ModelTypeForm
-            modelType={modelType}
-            onRename={onRenameModelType}
-            onUpdate={onUpdateModelType}
-          />
-        ) : modelRelationship ? (
-          <ModelRelationshipForm
-            relationship={modelRelationship}
-            onUpdate={onUpdateModelRelationship}
-          />
-        ) : (
-          <div className="props-empty">
-            Select a prim, instance, model type, or model relationship to edit properties.
-          </div>
-        )}
+        <fieldset className="props-fieldset" disabled={readOnly}>
+          {condition ? (
+            <ConditionForm condition={condition} onUpdate={onUpdateCondition} />
+          ) : subMesh ? (
+            <SubMeshForm subMesh={subMesh} />
+          ) : entityInstance ? (
+            <EntityInstanceForm
+              entity={entityInstance}
+              usdChild={entityUsdChild}
+              usdChildGuid={entityUsdChildGuid}
+              usdChildPrim={entityUsdChildPrim}
+              onUpdate={onUpdateEntityInstance}
+              onUpdatePrim={onUpdate}
+              resolvePrimAsUsd={resolvePrimAsUsd}
+              onRebindUsdPrim={onRebindUsdPrim}
+            />
+          ) : prim ? (
+            <Form prim={prim} mappedTo={mappedTo} onUpdate={onUpdate} />
+          ) : modelType ? (
+            <ModelTypeForm
+              modelType={modelType}
+              onRename={onRenameModelType}
+              onUpdate={onUpdateModelType}
+              resolvePrimAsUsd={resolvePrimAsUsd}
+            />
+          ) : modelRelationship ? (
+            <ModelRelationshipForm
+              relationship={modelRelationship}
+              onUpdate={onUpdateModelRelationship}
+            />
+          ) : (
+            <div className="props-empty">
+              Select a prim, instance, model type, or model relationship to edit properties.
+            </div>
+          )}
+        </fieldset>
       </div>
     </aside>
   );
@@ -129,11 +176,13 @@ export default function PropertiesPanel({
 function ModelTypeForm({
   modelType,
   onRename,
-  onUpdate
+  onUpdate,
+  resolvePrimAsUsd
 }: {
   modelType: OntologyEntityType;
   onRename: (oldName: string, newName: string) => void;
   onUpdate: (name: string, patch: Partial<Omit<OntologyEntityType, 'name'>>) => void;
+  resolvePrimAsUsd: (primId: string) => string | null;
 }) {
   const [name, setName] = useState(modelType.name);
   const [description, setDescription] = useState(modelType.description ?? '');
@@ -271,6 +320,7 @@ function ModelTypeForm({
           <UsdDropZone
             value={modelType.usd}
             onChange={(next) => onUpdate(modelType.name, { usd: next })}
+            resolvePrim={resolvePrimAsUsd}
           />
         </Row>
       )}
@@ -412,7 +462,9 @@ function EntityInstanceForm({
   usdChildGuid,
   usdChildPrim,
   onUpdate,
-  onUpdatePrim
+  onUpdatePrim,
+  resolvePrimAsUsd,
+  onRebindUsdPrim
 }: {
   entity: OntologyEntity;
   /** Hidden USD-child of `entity`. When present, its pose/USD/topic/GUID are
@@ -432,6 +484,8 @@ function EntityInstanceForm({
   ) => void;
   /** Prim patcher — same callback used by the standard prim Form. */
   onUpdatePrim: (id: string, patch: PrimPatch) => void;
+  resolvePrimAsUsd: (primId: string) => string | null;
+  onRebindUsdPrim: (targetEntityId: string, sourcePrimId: string) => void;
 }) {
   const [name, setName] = useState(entity.name);
   const extraProps = useMemo(
@@ -555,6 +609,8 @@ function EntityInstanceForm({
           <UsdDropZone
             value={entity.usd}
             onChange={(next) => onUpdate(entity.id, { usd: next })}
+            resolvePrim={resolvePrimAsUsd}
+            onPrimDrop={(primId) => onRebindUsdPrim(entity.id, primId)}
           />
         </Row>
       )}
@@ -575,6 +631,8 @@ function EntityInstanceForm({
           onUpdate={onUpdate}
           onUpdatePrim={onUpdatePrim}
           setVecAxis={setVecAxis}
+          resolvePrimAsUsd={resolvePrimAsUsd}
+          onRebindUsdPrim={onRebindUsdPrim}
         />
       )}
       <CustomPropsEditor
@@ -603,7 +661,9 @@ function UsdChildSection({
   prim,
   onUpdate,
   onUpdatePrim,
-  setVecAxis
+  setVecAxis,
+  resolvePrimAsUsd,
+  onRebindUsdPrim
 }: {
   child: OntologyEntity;
   /** Runtime prim id from App's bindings — empty/null when the child has no
@@ -626,6 +686,8 @@ function UsdChildSection({
     index: 0 | 1 | 2,
     raw: string
   ) => void;
+  resolvePrimAsUsd: (primId: string) => string | null;
+  onRebindUsdPrim: (targetEntityId: string, sourcePrimId: string) => void;
 }) {
   // Read position/rotation/scale. When a prim is bound, prefer its live
   // values so the form moves with the viewport gizmo; otherwise fall back
@@ -730,6 +792,8 @@ function UsdChildSection({
         <UsdDropZone
           value={child.usd ?? ''}
           onChange={(next) => onUpdate(child.id, { usd: next })}
+          resolvePrim={resolvePrimAsUsd}
+          onPrimDrop={(primId) => onRebindUsdPrim(child.id, primId)}
         />
       </Row>
       <Row label="Topic">
@@ -1019,29 +1083,205 @@ function Row({
   );
 }
 
+function ConditionForm({
+  condition,
+  onUpdate
+}: {
+  condition: Condition;
+  onUpdate: (id: string, patch: Partial<Omit<Condition, 'id'>>) => void;
+}) {
+  // Local mirror of the name so typing doesn't push a re-render on every
+  // keystroke; commit on blur (matches `ModelTypeForm`'s rename pattern).
+  const [name, setName] = useState(condition.name);
+  useEffect(() => {
+    setName(condition.name);
+  }, [condition.name]);
+
+  const updateRules = (next: ViewRule[]) => onUpdate(condition.id, { viewRules: next });
+  const updateRule = (id: string, patch: Partial<Omit<ViewRule, 'id'>>) => {
+    updateRules(
+      condition.viewRules.map((r) => (r.id === id ? { ...r, ...patch } : r))
+    );
+  };
+  const addRule = () => updateRules([...condition.viewRules, createViewRule()]);
+  const removeRule = (id: string) =>
+    updateRules(condition.viewRules.filter((r) => r.id !== id));
+
+  return (
+    <div className="props-form">
+      <Row label="Kind">
+        <input className="props-input is-readonly" value="Condition" readOnly />
+      </Row>
+      <Row label="Name">
+        <input
+          className="props-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={() => {
+            const trimmed = name.trim();
+            if (trimmed && trimmed !== condition.name) {
+              onUpdate(condition.id, { name: trimmed });
+            } else {
+              setName(condition.name);
+            }
+          }}
+        />
+      </Row>
+      <div className="props-section-header">
+        <span>View Rules</span>
+        <button
+          type="button"
+          className="props-section-add"
+          title="Add view rule"
+          aria-label="Add view rule"
+          onClick={addRule}
+        >
+          +
+        </button>
+      </div>
+      {condition.viewRules.length === 0 ? (
+        <div className="props-empty">
+          No view rules yet. Click + to add one.
+        </div>
+      ) : (
+        <ul className="view-rule-list">
+          {condition.viewRules.map((rule) => (
+            <ViewRuleEditor
+              key={rule.id}
+              rule={rule}
+              onChange={(patch) => updateRule(rule.id, patch)}
+              onRemove={() => removeRule(rule.id)}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ViewRuleEditor({
+  rule,
+  onChange,
+  onRemove
+}: {
+  rule: ViewRule;
+  onChange: (patch: Partial<Omit<ViewRule, 'id'>>) => void;
+  onRemove: () => void;
+}) {
+  // Live regex validation so an unparseable pattern can be flagged without
+  // throwing. We don't gate input on validity — the user may be mid-edit.
+  const patternError = useMemo(() => {
+    if (!rule.pattern) return null;
+    try {
+      new RegExp(rule.pattern);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : 'Invalid regular expression';
+    }
+  }, [rule.pattern]);
+
+  return (
+    <li className="view-rule">
+      <div className="view-rule-header">
+        <span className="view-rule-title">View Rule</span>
+        <button
+          type="button"
+          className="view-rule-remove"
+          title="Remove view rule"
+          aria-label="Remove view rule"
+          onClick={onRemove}
+        >
+          ×
+        </button>
+      </div>
+      <Row label="Pattern">
+        <input
+          className={'props-input' + (patternError ? ' is-invalid' : '')}
+          value={rule.pattern}
+          placeholder="Regular expression"
+          spellCheck={false}
+          onChange={(e) => onChange({ pattern: e.target.value })}
+          title={patternError ?? 'Regex tested against the bound entity value'}
+        />
+      </Row>
+      <Row label="Type">
+        <select
+          className="props-input"
+          value={rule.kind}
+          onChange={(e) => {
+            const kind = e.target.value as ViewRuleKind;
+            // Pre-seed an icon the first time the user picks an icon-bearing
+            // kind so the picker isn't empty on switch.
+            if ((kind === 'icon' || kind === 'both') && !rule.icon) {
+              onChange({ kind, icon: 'warning' });
+            } else {
+              onChange({ kind });
+            }
+          }}
+        >
+          <option value="icon">Show icon</option>
+          <option value="color">Change color</option>
+          <option value="both">Show icon and change color</option>
+        </select>
+      </Row>
+      <Row label="Color">
+        <input
+          type="color"
+          className="props-color"
+          value={rule.color || DEFAULT_CONDITION_COLOR}
+          onChange={(e) => onChange({ color: e.target.value })}
+          title={rule.kind === 'color' ? 'Object tint color' : 'Icon background color'}
+        />
+      </Row>
+      {(rule.kind === 'icon' || rule.kind === 'both') && (
+        <Row label="Icon">
+          <div className="condition-icon-picker" role="radiogroup" aria-label="Icon">
+            {CONDITION_ICONS.map((iconName: ConditionIcon) => (
+              <ConditionIconChip
+                key={iconName}
+                icon={iconName}
+                background={rule.color || DEFAULT_CONDITION_COLOR}
+                selected={rule.icon === iconName}
+                onClick={() => onChange({ icon: iconName })}
+                title={CONDITION_ICON_LABELS[iconName]}
+              />
+            ))}
+          </div>
+        </Row>
+      )}
+    </li>
+  );
+}
+
 function UsdDropZone({
   value,
-  onChange
+  onChange,
+  resolvePrim,
+  onPrimDrop
 }: {
   value: string;
   onChange: (next: string) => void;
+  /** Optional resolver to also accept drags from the Hierarchy panel
+   *  (PRIM_DRAG_MIME). When the dropped prim maps to a library asset/shape
+   *  the resolver returns its `/usd_assets|usd_shapes/<id>.usda` path; null
+   *  payloads (or a missing resolver) cause prim drops to be ignored. */
+  resolvePrim?: (primId: string) => string | null;
+  /** When set, PRIM drops route here instead of `onChange`: the entity is
+   *  rebound to the actual dragged prim (deleting the previously-bound
+   *  prim) rather than spawning a duplicate from a USDA path. */
+  onPrimDrop?: (primId: string) => void;
 }) {
   const [over, setOver] = useState(false);
 
-  const resolve = (ev: React.DragEvent): string | null => {
-    const shape = ev.dataTransfer.getData(SHAPE_DRAG_MIME);
-    if (shape && shape !== 'group') {
-      const file = shape.charAt(0).toUpperCase() + shape.slice(1);
-      return `usd_shapes/${file}.usda`;
-    }
-    const asset = ev.dataTransfer.getData(ASSET_DRAG_MIME);
-    if (asset) return `usd_assets/${asset}.usda`;
-    return null;
-  };
-
   const onDragOver = (ev: React.DragEvent) => {
     const types = ev.dataTransfer.types;
-    if (!types.includes(SHAPE_DRAG_MIME) && !types.includes(ASSET_DRAG_MIME)) {
+    const isPrim =
+      (onPrimDrop || resolvePrim) && types.includes(PRIM_DRAG_MIME);
+    if (
+      !types.includes(SHAPE_DRAG_MIME) &&
+      !types.includes(ASSET_DRAG_MIME) &&
+      !isPrim
+    ) {
       return;
     }
     ev.preventDefault();
@@ -1052,8 +1292,33 @@ function UsdDropZone({
   const onDrop = (ev: React.DragEvent) => {
     ev.preventDefault();
     setOver(false);
-    const next = resolve(ev);
-    if (next) onChange(next);
+    // PRIM drop — rebind to the actual dragged prim when onPrimDrop is set.
+    // The dragged prim becomes the new binding and the previously-bound
+    // prim is deleted (handled in App). Falls through to the URL-resolve
+    // path when onPrimDrop is missing.
+    const primRaw = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+    if (primRaw) {
+      const primId = decodeDragIds(primRaw)[0];
+      if (primId && onPrimDrop) {
+        onPrimDrop(primId);
+        return;
+      }
+      if (primId && resolvePrim) {
+        const url = resolvePrim(primId);
+        // Strip leading slash so the stored value matches the shape/asset
+        // drop format (`usd_assets/X.usda` vs `/usd_assets/X.usda`).
+        if (url) onChange(url.replace(/^\//, ''));
+        return;
+      }
+    }
+    const shape = ev.dataTransfer.getData(SHAPE_DRAG_MIME);
+    if (shape && shape !== 'group') {
+      const file = shape.charAt(0).toUpperCase() + shape.slice(1);
+      onChange(`usd_shapes/${file}.usda`);
+      return;
+    }
+    const asset = ev.dataTransfer.getData(ASSET_DRAG_MIME);
+    if (asset) onChange(`usd_assets/${asset}.usda`);
   };
 
   const icon = renderUsdIcon(value);

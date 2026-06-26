@@ -19,10 +19,8 @@ const ALLOWLIST = (typeof __DIST_ASSET_ALLOWLIST__ !== 'undefined'
   ? __DIST_ASSET_ALLOWLIST__
   : []) as string[];
 
-// Curated set of asset ids actually exposed in the deployment palette. The
-// `Blank` placeholder is rendered separately by AssetsPalette and is not
-// part of this list.
-const DEPLOYABLE_ASSET_IDS = new Set(['HospitalBed', 'Room']);
+// Curated set of asset ids actually exposed in the deployment palette.
+const DEPLOYABLE_ASSET_IDS = new Set(['HospitalBed', 'Room', 'Placeholder']);
 
 export interface AssetDef {
   id: string;
@@ -35,7 +33,8 @@ const LABEL_OVERRIDES: Record<string, string> = {
   shelves_01: 'Shelves',
   HospitalBed: 'Hospital Bed',
   Room: 'Room',
-  UR10: 'UR10'
+  UR10: 'UR10',
+  Placeholder: 'Placeholder'
 };
 
 export const ASSET_LIBRARY: AssetDef[] = Object.entries(assetModules)

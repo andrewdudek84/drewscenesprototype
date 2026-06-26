@@ -9,6 +9,10 @@ interface Props {
   onSnapToggle: () => void;
   sceneOpen: boolean;
   onToggleScene: () => void;
+  /** Scene Editor mode hides authoring affordances: the move / rotate /
+   *  scale gizmo selectors and the snap toggle. Select, Measure, Focus and
+   *  the viewport-panel toggle remain. */
+  readOnly?: boolean;
 }
 
 const TOOLS: { id: ToolMode; label: string; icon: JSX.Element }[] = [
@@ -95,10 +99,13 @@ const TOOLS: { id: ToolMode; label: string; icon: JSX.Element }[] = [
   }
 ];
 
-export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, onSnapToggle, sceneOpen, onToggleScene }: Props) {
+export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, onSnapToggle, sceneOpen, onToggleScene, readOnly = false }: Props) {
+  const visibleTools = readOnly
+    ? TOOLS.filter((t) => t.id === 'select')
+    : TOOLS;
   return (
     <aside className="panel toolbar">
-      {TOOLS.map((t) => (
+      {visibleTools.map((t) => (
         <button
           key={t.id}
           type="button"
@@ -111,44 +118,48 @@ export default function LeftToolbar({ tool, onToolChange, onFocus, snapEnabled, 
           {t.icon}
         </button>
       ))}
-      <div className="tool-divider" aria-hidden="true" />
-      <button
-        type="button"
-        className={`tool-btn${snapEnabled ? ' is-active' : ''}`}
-        title={
-          snapEnabled
-            ? 'Snap to grid: ON \u2014 click to disable'
-            : 'Snap to grid: OFF \u2014 click to enable'
-        }
-        aria-label={snapEnabled ? 'Disable snap to grid' : 'Enable snap to grid'}
-        aria-pressed={snapEnabled}
-        onClick={onSnapToggle}
-      >
-        <svg
-          viewBox="0 0 24 24"
-          width="20"
-          height="20"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          {/* 3x3 grid of dots with a magnet/pin on the center cell. */}
-          <circle cx="5" cy="5" r="1" fill="currentColor" stroke="none" />
-          <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none" />
-          <circle cx="19" cy="5" r="1" fill="currentColor" stroke="none" />
-          <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
-          <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
-          <circle cx="5" cy="19" r="1" fill="currentColor" stroke="none" />
-          <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
-          <circle cx="19" cy="19" r="1" fill="currentColor" stroke="none" />
-          <rect x="10" y="10" width="4" height="4" fill="currentColor" stroke="none" />
-          {!snapEnabled && (
-            <line x1="3" y1="21" x2="21" y2="3" stroke="currentColor" strokeWidth="1.8" />
-          )}
-        </svg>
-      </button>
+      {!readOnly && (
+        <>
+          <div className="tool-divider" aria-hidden="true" />
+          <button
+            type="button"
+            className={`tool-btn${snapEnabled ? ' is-active' : ''}`}
+            title={
+              snapEnabled
+                ? 'Snap to grid: ON \u2014 click to disable'
+                : 'Snap to grid: OFF \u2014 click to enable'
+            }
+            aria-label={snapEnabled ? 'Disable snap to grid' : 'Enable snap to grid'}
+            aria-pressed={snapEnabled}
+            onClick={onSnapToggle}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              {/* 3x3 grid of dots with a magnet/pin on the center cell. */}
+              <circle cx="5" cy="5" r="1" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="5" r="1" fill="currentColor" stroke="none" />
+              <circle cx="19" cy="5" r="1" fill="currentColor" stroke="none" />
+              <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+              <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+              <circle cx="5" cy="19" r="1" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+              <circle cx="19" cy="19" r="1" fill="currentColor" stroke="none" />
+              <rect x="10" y="10" width="4" height="4" fill="currentColor" stroke="none" />
+              {!snapEnabled && (
+                <line x1="3" y1="21" x2="21" y2="3" stroke="currentColor" strokeWidth="1.8" />
+              )}
+            </svg>
+          </button>
+        </>
+      )}
       <div className="tool-divider" aria-hidden="true" />
       <button
         type="button"

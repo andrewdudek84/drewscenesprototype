@@ -28,15 +28,10 @@ const SCENE_NAME_ANIMALS = [
   'Turtle', 'Walrus', 'Weasel', 'Whale', 'Wolf', 'Wolverine', 'Wombat',
   'Yak', 'Zebra'
 ];
-const SCENE_NAME_NOUNS = [
-  'Scene', 'Setting', 'Stage', 'Locale', 'Vista', 'View', 'Tableau',
-  'Backdrop', 'Landscape', 'Panorama', 'Scenery', 'Spot', 'Venue', 'Place'
-];
 export function randomSceneName(): string {
   const adj = SCENE_NAME_ADJECTIVES[Math.floor(Math.random() * SCENE_NAME_ADJECTIVES.length)];
   const animal = SCENE_NAME_ANIMALS[Math.floor(Math.random() * SCENE_NAME_ANIMALS.length)];
-  const noun = SCENE_NAME_NOUNS[Math.floor(Math.random() * SCENE_NAME_NOUNS.length)];
-  return `${adj} ${animal} ${noun}`;
+  return `${adj} ${animal}`;
 }
 
 // Compute the next free `<base>_<n>` name for a duplicated prim. If the source

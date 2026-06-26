@@ -2,6 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 
 export type Theme = 'dark' | 'light';
 
+/** Top-level workspace mode. Drives both the title prefix and which side
+ *  panels are visible. The Ontology Editor is the authoring surface for
+ *  the shared ontology; Scene Editor / Viewer compose scene files (JSON
+ *  with conditions + selected instances) on top of an unchanged ontology. */
+export type AppMode = 'ontology' | 'scene-editor' | 'scene-viewer';
+
+const MODE_LABELS: Record<AppMode, string> = {
+  'ontology': 'Ontology Editor',
+  'scene-editor': 'Scene Editor',
+  'scene-viewer': 'Scene Viewer'
+};
+
+const MODE_TITLE_PREFIX: Record<AppMode, string> = {
+  'ontology': 'Editing ontology:\u00a0',
+  'scene-editor': 'Editing scene:\u00a0',
+  'scene-viewer': 'Viewing scene:\u00a0'
+};
+
 interface Props {
   sceneName: string;
   onSceneNameChange: (name: string) => void;
@@ -9,6 +27,8 @@ interface Props {
   onImport: (file: File) => void;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
+  mode: AppMode;
+  onModeChange: (mode: AppMode) => void;
 }
 
 export default function TopBar({
@@ -17,7 +37,9 @@ export default function TopBar({
   onExport,
   onImport,
   theme,
-  onThemeChange
+  onThemeChange,
+  mode,
+  onModeChange
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(sceneName);
@@ -95,11 +117,25 @@ export default function TopBar({
             title="Click to rename scene"
             onClick={() => setEditing(true)}
           >
-            <span className="scene-title-prefix">Editing scene:&nbsp;</span>
+            <span className="scene-title-prefix">{MODE_TITLE_PREFIX[mode]}</span>
             <span className="scene-title-text">{sceneName}</span>
             <PencilIcon />
           </button>
         )}
+      </div>
+      <div className="topbar-center" role="tablist" aria-label="Workspace mode">
+        {(['ontology', 'scene-editor', 'scene-viewer'] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            className={`mode-btn${mode === m ? ' is-active' : ''}`}
+            onClick={() => onModeChange(m)}
+          >
+            {MODE_LABELS[m]}
+          </button>
+        ))}
       </div>
       <div className="topbar-right">
         <input

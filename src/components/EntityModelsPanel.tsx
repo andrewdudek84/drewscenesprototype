@@ -27,11 +27,33 @@ function filterHiddenNodes(nodes: ModelNode[]): ModelNode[] {
   return out;
 }
 
+/** Filter a model tree to nodes whose name matches `q` (case-insensitive
+ *  substring) OR have at least one descendant that matches. Non-matching
+ *  branches are pruned; matching ancestors are kept so the tree path
+ *  stays coherent. */
+function filterNodesByQuery(nodes: ModelNode[], q: string): ModelNode[] {
+  if (!q) return nodes;
+  const needle = q.toLowerCase();
+  const out: ModelNode[] = [];
+  for (const n of nodes) {
+    const selfMatch = n.type.name.toLowerCase().includes(needle);
+    const filteredChildren = filterNodesByQuery(n.children, q);
+    if (selfMatch || filteredChildren.length > 0) {
+      out.push({ ...n, children: filteredChildren });
+    }
+  }
+  return out;
+}
+
 interface Props {
   roots: ModelNode[];
   modelRelationships: OntologyRelationship[];
   selectedTypeName: string | null;
   selectedRelationshipIndex: number | null;
+  /** Number of entity instances per type name. Rendered as a small count
+   *  badge on the right of each row; types missing from the map (or with
+   *  count 0) render no badge. */
+  instanceCountByType: ReadonlyMap<string, number>;
   /** Add a brand-new entity type (caller picks a unique placeholder name and
    *  immediately puts it in inline-edit mode). */
   onAddType: () => void;
@@ -61,6 +83,10 @@ interface Props {
    *  root) is allowed. Invalid drops are refused and shake the row to signal
    *  "no" instead of mutating the model. */
   canReparent: (name: string, newParent: string | null) => boolean;
+  /** When true the panel hides authoring affordances: the "+" header
+   *  button, right-click context menus, inline rename, and drag-drop
+   *  reparenting. Selection and expand/collapse remain interactive. */
+  readOnly?: boolean;
 }
 
 interface DragInfo {
@@ -73,6 +99,7 @@ export default function EntityModelsPanel({
   modelRelationships,
   selectedTypeName,
   selectedRelationshipIndex,
+  instanceCountByType,
   onAddType,
   onSelectType,
   onSelectRelationship,
@@ -81,13 +108,20 @@ export default function EntityModelsPanel({
   onCommitRename,
   onCancelRename,
   onReparent,
-  canReparent
+  canReparent,
+  readOnly = false
 }: Props) {
   const dragRef = useRef<DragInfo | null>(null);
   const [rootDropOver, setRootDropOver] = useState(false);
   const [rootShake, setRootShake] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const trimmedQuery = searchQuery.trim();
+  const isSearching = trimmedQuery.length > 0;
 
-  const visibleRoots = useMemo(() => filterHiddenNodes(roots), [roots]);
+  const visibleRoots = useMemo(() => {
+    const hidden = filterHiddenNodes(roots);
+    return isSearching ? filterNodesByQuery(hidden, trimmedQuery) : hidden;
+  }, [roots, isSearching, trimmedQuery]);
 
   // Lookup: name -> set of descendants (inclusive) across all DAG paths.
   // Built by walking the rendered tree (which may contain a type under
@@ -118,12 +152,14 @@ export default function EntityModelsPanel({
   }, [roots]);
 
   const onBgContextMenu = (ev: React.MouseEvent) => {
+    if (readOnly) return;
     if (ev.target !== ev.currentTarget) return;
     ev.preventDefault();
     onContextMenu('', null, ev.clientX, ev.clientY);
   };
 
   const onRootDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     if (!ev.dataTransfer.types.includes(ENTITY_TYPE_DRAG_MIME)) return;
     ev.preventDefault();
     // Root drops are never allowed by the additive reparent semantics — to
@@ -148,25 +184,48 @@ export default function EntityModelsPanel({
     <aside className="panel models">
       <header className="panel-header panel-header-with-actions">
         <span>Entity Models</span>
-        <button
-          type="button"
-          className="panel-header-btn"
-          title="Add type"
-          aria-label="Add entity type"
-          onClick={onAddType}
-        >
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path
-              d="M8 3 V13 M3 8 H13"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
+        {!readOnly && (
+          <button
+            type="button"
+            className="panel-header-btn"
+            title="Add type"
+            aria-label="Add entity type"
+            onClick={onAddType}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path
+                d="M8 3 V13 M3 8 H13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        )}
       </header>
       <div className="panel-body" onContextMenu={onBgContextMenu}>
+        <div className="panel-search">
+          <input
+            type="search"
+            className="panel-search-input"
+            placeholder="Search entity models…"
+            value={searchQuery}
+            onChange={(ev) => setSearchQuery(ev.target.value)}
+            aria-label="Search entity models"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              className="panel-search-clear"
+              title="Clear search"
+              aria-label="Clear search"
+              onClick={() => setSearchQuery('')}
+            >
+              ×
+            </button>
+          )}
+        </div>
         <ul
           className={
             'tree' +
@@ -182,7 +241,9 @@ export default function EntityModelsPanel({
           }}
         >
           {visibleRoots.length === 0 ? (
-            <li className="tree-empty">No entity model types.</li>
+            <li className="tree-empty">
+              {isSearching ? 'No matching entity types.' : 'No entity model types.'}
+            </li>
           ) : (
             visibleRoots.map((n) => (
               <ModelTreeNode
@@ -190,6 +251,7 @@ export default function EntityModelsPanel({
                 node={n}
                 parentName={null}
                 selectedTypeName={selectedTypeName}
+                instanceCountByType={instanceCountByType}
                 onSelectType={onSelectType}
                 editingName={editingName}
                 onContextMenu={onContextMenu}
@@ -199,6 +261,8 @@ export default function EntityModelsPanel({
                 canReparent={canReparent}
                 dragRef={dragRef}
                 descendantsByName={descendantsByName}
+                forceExpand={isSearching}
+                readOnly={readOnly}
               />
             ))
           )}
@@ -208,13 +272,25 @@ export default function EntityModelsPanel({
             <span>Relationships</span>
           </div>
           {(() => {
+            const needle = trimmedQuery.toLowerCase();
             const visibleRelationships = modelRelationships
               .map((r, i) => ({ r, i }))
-              .filter(
-                ({ r }) => !HIDDEN_RELATIONSHIP_TYPE_NAMES.has(r.type)
-              );
+              .filter(({ r }) => !HIDDEN_RELATIONSHIP_TYPE_NAMES.has(r.type))
+              .filter(({ r }) => {
+                if (!isSearching) return true;
+                return (
+                  r.type.toLowerCase().includes(needle) ||
+                  r.source.toLowerCase().includes(needle) ||
+                  r.target.toLowerCase().includes(needle) ||
+                  (r.usd ?? '').toLowerCase().includes(needle)
+                );
+              });
             if (visibleRelationships.length === 0) {
-              return <div className="tree-empty">No model relationships.</div>;
+              return (
+                <div className="tree-empty">
+                  {isSearching ? 'No matching relationships.' : 'No model relationships.'}
+                </div>
+              );
             }
             return (
               <ul className="model-relationship-list">
@@ -250,6 +326,7 @@ interface NodeProps {
    *  identify which edge they're acting on. */
   parentName: string | null;
   selectedTypeName: string | null;
+  instanceCountByType: ReadonlyMap<string, number>;
   onSelectType: (name: string) => void;
   editingName: string | null;
   onContextMenu: (
@@ -264,12 +341,20 @@ interface NodeProps {
   canReparent: (name: string, newParent: string | null) => boolean;
   dragRef: React.MutableRefObject<DragInfo | null>;
   descendantsByName: Map<string, Set<string>>;
+  /** When true, the node renders expanded regardless of local toggle state.
+   *  Used while a search query is active so matches deep in the tree are
+   *  visible without the user expanding every ancestor manually. */
+  forceExpand?: boolean;
+  /** Authoring affordances (drag-drop reparent, right-click menu, inline
+   *  rename) are suppressed when true. */
+  readOnly?: boolean;
 }
 
 function ModelTreeNode({
   node,
   parentName,
   selectedTypeName,
+  instanceCountByType,
   onSelectType,
   editingName,
   onContextMenu,
@@ -278,16 +363,21 @@ function ModelTreeNode({
   onReparent,
   canReparent,
   dragRef,
-  descendantsByName
+  descendantsByName,
+  forceExpand = false,
+  readOnly = false
 }: NodeProps) {
   const hasChildren = node.children.length > 0;
   const [expanded, setExpanded] = useState(true);
+  const effectiveExpanded = forceExpand || expanded;
   const [dropOver, setDropOver] = useState(false);
   const [shake, setShake] = useState(false);
   const isEditing = editingName === node.type.name;
   const isSelected = selectedTypeName === node.type.name;
+  const instanceCount = instanceCountByType.get(node.type.name) ?? 0;
 
   const onDragStart = (ev: React.DragEvent) => {
+    if (readOnly) return;
     ev.stopPropagation();
     ev.dataTransfer.setData(ENTITY_TYPE_DRAG_MIME, node.type.name);
     ev.dataTransfer.effectAllowed = 'move';
@@ -300,6 +390,7 @@ function ModelTreeNode({
     dragRef.current = null;
   };
   const onDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     if (!ev.dataTransfer.types.includes(ENTITY_TYPE_DRAG_MIME)) return;
     const drag = dragRef.current;
     // USD is always a root in the model tree, so refuse to accept it
@@ -321,6 +412,7 @@ function ModelTreeNode({
   };
   const onDragLeave = () => setDropOver(false);
   const onDrop = (ev: React.DragEvent) => {
+    if (readOnly) return;
     setDropOver(false);
     const name = ev.dataTransfer.getData(ENTITY_TYPE_DRAG_MIME);
     if (!name || name === node.type.name) return;
@@ -348,7 +440,7 @@ function ModelTreeNode({
           (shake ? ' is-shake-no' : '')
         }
         title={node.type.description ?? node.type.name}
-        draggable={!isEditing}
+        draggable={!isEditing && !readOnly}
         onClick={(ev) => {
           ev.stopPropagation();
           onSelectType(node.type.name);
@@ -362,6 +454,7 @@ function ModelTreeNode({
           if (shake) setShake(false);
         }}
         onContextMenu={(ev) => {
+          if (readOnly) return;
           ev.preventDefault();
           ev.stopPropagation();
           onContextMenu(node.type.name, parentName, ev.clientX, ev.clientY);
@@ -370,9 +463,9 @@ function ModelTreeNode({
         {hasChildren ? (
           <button
             type="button"
-            className={`tree-toggle${expanded ? ' is-expanded' : ''}`}
+            className={`tree-toggle${effectiveExpanded ? ' is-expanded' : ''}`}
             onClick={() => setExpanded((v) => !v)}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
+            aria-label={effectiveExpanded ? 'Collapse' : 'Expand'}
           >
             ▶
           </button>
@@ -388,8 +481,17 @@ function ModelTreeNode({
         ) : (
           <span className="tree-label">{node.type.name}</span>
         )}
+        {!isEditing && instanceCount > 0 && (
+          <span
+            className="tree-count"
+            title={`${instanceCount} instance${instanceCount === 1 ? '' : 's'} of ${node.type.name}`}
+            aria-label={`${instanceCount} instance${instanceCount === 1 ? '' : 's'}`}
+          >
+            {instanceCount}
+          </span>
+        )}
       </div>
-      {hasChildren && expanded && (
+      {hasChildren && effectiveExpanded && (
         <ul>
           {node.children.map((c) => (
             <ModelTreeNode
@@ -397,6 +499,7 @@ function ModelTreeNode({
               node={c}
               parentName={node.type.name}
               selectedTypeName={selectedTypeName}
+              instanceCountByType={instanceCountByType}
               onSelectType={onSelectType}
               editingName={editingName}
               onContextMenu={onContextMenu}
@@ -406,6 +509,8 @@ function ModelTreeNode({
               canReparent={canReparent}
               dragRef={dragRef}
               descendantsByName={descendantsByName}
+              forceExpand={forceExpand}
+              readOnly={readOnly}
             />
           ))}
         </ul>

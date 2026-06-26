@@ -206,10 +206,10 @@ export function loadHospitalOntology(): {
  *  self-consistent (no stale mappings carry over from a previous load).
  *
  *  When `primPoseById` is supplied, the live local pose of the bound prim
- *  is also copied into the entity's `position` / `rotation` so the saved
- *  ontology captures whatever the viewport gizmo last produced. Without
- *  this, an exported entity would freeze at whatever pose it had at
- *  creation time. */
+ *  is written onto the **HasUSD child** of the bound entity (the USD-typed
+ *  entity that holds the geometry pointer). Loading then reads pose from
+ *  these USD children to spawn the viewport prims, with `usd` / `guid` /
+ *  pose all colocated on the USD entity. */
 export function applyBindingsToOntology(
   doc: OntologyDoc,
   bindings: Record<string, SpatialBinding>,
@@ -223,16 +223,36 @@ export function applyBindingsToOntology(
   >
 ): OntologyDoc {
   const clone = JSON.parse(JSON.stringify(doc)) as OntologyDoc;
+  // bound entity id -> its HasUSD child entity id (the USD-typed target).
+  const usdChildBySource = new Map<string, string>();
+  for (const r of clone.instances.relationships) {
+    if (r.type === 'HasUSD') usdChildBySource.set(r.source, r.target);
+  }
+  const entityById = new Map(clone.instances.entities.map((e) => [e.id, e] as const));
+
   for (const e of clone.instances.entities) {
     const b = bindings[e.id];
     if (b) {
-      e.usd = b.usd;
-      e.guid = b.guid;
+      const usdChildId = usdChildBySource.get(e.id);
+      const usdEntity = usdChildId ? entityById.get(usdChildId) : undefined;
+      // Stamp usd / guid / pose onto the USD child if we have one; otherwise
+      // fall back to the bound entity itself so a binding without a HasUSD
+      // edge still records something (ensureHasUsdEdges normally fixes that
+      // up before this function runs).
+      const target = usdEntity ?? e;
+      target.usd = b.usd;
+      target.guid = b.guid;
       const pose = primPoseById?.get(b.guid);
       if (pose) {
-        e.position = { x: pose.position[0], y: pose.position[1], z: pose.position[2] };
-        e.rotation = { x: pose.rotation[0], y: pose.rotation[1], z: pose.rotation[2] };
-        e.scale = { x: pose.scale[0], y: pose.scale[1], z: pose.scale[2] };
+        target.position = { x: pose.position[0], y: pose.position[1], z: pose.position[2] };
+        target.rotation = { x: pose.rotation[0], y: pose.rotation[1], z: pose.rotation[2] };
+        target.scale = { x: pose.scale[0], y: pose.scale[1], z: pose.scale[2] };
+      }
+      // The bound parent entity should not carry stale geometry pointers
+      // when the pose now lives on its USD child.
+      if (usdEntity) {
+        if (e.usd) e.usd = '';
+        if (e.guid) e.guid = '';
       }
     } else if ('guid' in e || 'usd' in e) {
       if (e.usd) e.usd = '';
@@ -705,13 +725,21 @@ export function addEntityInstance(
   const id = `${type.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.random()
     .toString(36)
     .slice(2, 8)}`;
-  const baseName =
-    name.trim() || `${type} ${next.instances.entities.length + 1}`;
+  const stem = name.trim() || type;
   const takenNames = new Set(next.instances.entities.map((e) => e.name));
+  // New instances always carry a `_<n>` suffix starting at `_1` (and bump
+  // to the smallest free n on collision) so the user sees `Bed_1`, `Bed_2`,
+  // ... from the very first one rather than `Bed`, `Bed_1`, `Bed_2`.
+  let nameN = 1;
+  let instanceName = `${stem}_${nameN}`;
+  while (takenNames.has(instanceName)) {
+    nameN += 1;
+    instanceName = `${stem}_${nameN}`;
+  }
   const entity: OntologyEntity = {
     id,
     type,
-    name: uniqueInstanceName(baseName, takenNames)
+    name: instanceName
   };
   if (type === 'USD') {
     entity.position = { x: 0, y: 0, z: 0 };
@@ -765,6 +793,73 @@ export function addEntityInstance(
     }
   }
   return { doc: next, id, spatialId, usd: modelUsd || undefined };
+}
+
+/** Drag-drop side-effect: attach a USDA asset to an existing instance.
+ *  Upserts a HasUSD edge from `instanceId` to a USD entity holding
+ *  `usdPath`. If a HasUSD edge already exists, the existing USD entity's
+ *  `usd` field is updated in place (and renamed if `suggestedName` is
+ *  given). Otherwise a fresh USD entity is created and the edge added.
+ *  Returns null when `instanceId` doesn't exist, refers to a USD entity
+ *  itself, or `usdPath` is empty. */
+export function attachUsdToInstance(
+  doc: OntologyDoc,
+  instanceId: string,
+  usdPath: string,
+  suggestedName?: string
+): { doc: OntologyDoc; usdId: string } | null {
+  const cleanPath = (usdPath ?? '').trim();
+  if (!cleanPath) return null;
+  const next = cloneDoc(doc);
+  const entities = next.instances.entities;
+  const rels = next.instances.relationships;
+  const instance = entities.find((e) => e.id === instanceId);
+  if (!instance || instance.type === 'USD') return null;
+
+  const existing = rels.find((r) => r.type === 'HasUSD' && r.source === instanceId);
+  if (existing) {
+    const target = entities.find((e) => e.id === existing.target);
+    if (target) {
+      target.usd = cleanPath;
+      if (suggestedName && suggestedName.trim()) {
+        const taken = new Set(
+          entities.filter((e) => e.id !== target.id).map((e) => e.name)
+        );
+        target.name = uniqueInstanceName(suggestedName.trim(), taken);
+      }
+      return { doc: next, usdId: target.id };
+    }
+    next.instances.relationships = rels.filter((r) => r !== existing);
+  }
+
+  const model = next.model;
+  const usdType =
+    model?.relationships?.find(
+      (r) => r.type === 'HasUSD' && r.source === instance.type
+    )?.target ?? 'USD';
+  const usdId = `usd-${Math.random().toString(36).slice(2, 8)}`;
+  const taken = new Set(entities.map((e) => e.name));
+  const baseName = suggestedName?.trim() || `${instance.name} USD`;
+  const spatial: OntologyEntity = {
+    id: usdId,
+    type: usdType,
+    name: uniqueInstanceName(baseName, taken),
+    position: { x: 0, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0 },
+    scale: { x: 1, y: 1, z: 1 },
+    usd: cleanPath,
+    topic: '',
+    guid: ''
+  };
+  const spatialTypeDef = model?.entityTypes.find((t) => t.name === usdType);
+  if (spatialTypeDef) copyTypeCustomProps(spatialTypeDef, spatial);
+  entities.push(spatial);
+  next.instances.relationships.push({
+    type: 'HasUSD',
+    source: instanceId,
+    target: usdId
+  });
+  return { doc: next, usdId };
 }
 
 /** Duplicate an entity instance and every descendant reached via HasChild /

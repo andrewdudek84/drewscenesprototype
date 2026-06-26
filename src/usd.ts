@@ -78,6 +78,14 @@ function renderPrim(
   // be reconnected on import — without this, parseUsda mints fresh ids and
   // the saved SpatialItem.guid no longer resolves to anything.
   lines.push(`${inner}custom string drewscenes:id = "${prim.id}"`);
+  // Persist `assetId` so the runtime can tell which prims are the top-level
+  // of a spawned asset (e.g. Room/HospitalBed). Viewport click selection
+  // walks up to the innermost ancestor with `assetId` set, so this round-trip
+  // is what makes the "clicking a wall selects the whole Room" rule survive
+  // a save/load cycle.
+  if (prim.assetId) {
+    lines.push(`${inner}custom string drewscenes:assetId = "${prim.assetId}"`);
+  }
   lines.push(
     `${inner}double3 xformOp:translate = ${vec3(prim.position)}`
   );
@@ -308,6 +316,9 @@ function walk(node: ParsedNode, parentId: string | null, out: PrimNode[]): void 
   // ids round-trip and ontology bindings can reattach by guid.
   const persistedId = (node.attrs.get('drewscenes:id') ?? '').replace(/^"|"$/g, '');
   const id = persistedId || newId();
+  // Persisted asset boundary marker (see exportToUsda). Lets the runtime's
+  // viewport-select walk identify the asset top-level after a save/load.
+  const persistedAssetId = (node.attrs.get('drewscenes:assetId') ?? '').replace(/^"|"$/g, '');
   out.push({
     id,
     name: node.name,
@@ -317,7 +328,8 @@ function walk(node: ParsedNode, parentId: string | null, out: PrimNode[]): void 
     scale,
     parentId,
     color,
-    ...(assetSource ? { assetSource } : {})
+    ...(assetSource ? { assetSource } : {}),
+    ...(persistedAssetId ? { assetId: persistedAssetId } : {})
   });
   for (const c of xformChildren) walk(c, id, out);
 }

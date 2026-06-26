@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   AbstractMesh,
   ArcRotateCamera,
+  type AssetContainer,
   Camera,
   Color3,
   Color4,
@@ -97,6 +98,10 @@ interface Props {
    *  so a single entry is pushed using the snapshot captured at
    *  onBeginTransformBatch time. */
   onEndTransformBatch: () => void;
+  /** When false, palette / hierarchy drag sources are no longer accepted as
+   *  drops on the canvas. Used by Scene Editor mode (the scene is
+   *  read-only — geometry comes from the ontology, not user drops). */
+  dropEnabled?: boolean;
 }
 
 // Translation snap = the grid's minor tick (FR-14.3 in the spec: 1 m).
@@ -105,8 +110,12 @@ const POSITION_SNAP = 1;
 const ROTATION_SNAP = (5 * Math.PI) / 180;
 // Scale snap kept fine-grained; not asked for explicitly but matches the move-snap feel.
 const SCALE_SNAP = 0.25;
-const SELECTION_COLOR = new Color4(0.35, 0.7, 1, 0.6);
-const SELECTION_EDGE_WIDTH = 3;
+const SELECTION_COLOR = new Color3(0.35, 0.7, 1);
+// Alpha used by the renderOverlay tint on selected meshes. Low enough that
+// the underlying material/textures still read through, high enough that the
+// selection is obvious. Tweak together with SELECTION_COLOR if either feels
+// off.
+const SELECTION_OVERLAY_ALPHA = 0.25;
 
 // Match the origin axis lines below so gizmo colors read as the same axes.
 const AXIS_COLORS = {
@@ -133,7 +142,8 @@ export default function Viewport({
   snapEnabled,
   onContextMenu,
   onBeginTransformBatch,
-  onEndTransformBatch
+  onEndTransformBatch,
+  dropEnabled = true
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -205,6 +215,9 @@ export default function Viewport({
   // Snap toggle captured so the long-lived ensureSnapRef closure can read
   // the current setting without being rebuilt on every flip.
   const snapEnabledRef = useRef(snapEnabled);
+  // Drop-target gating captured so the once-attached canvas listeners can
+  // refuse drops in Scene Editor mode without being re-bound.
+  const dropEnabledRef = useRef(dropEnabled);
   // Latest selection captured so the focus / frame effect can read it
   // without re-running every time the user clicks something new.
   const selectedIdRef = useRef(selectedId);
@@ -214,10 +227,11 @@ export default function Viewport({
   // reads it at drag start to pick up the current "secondary" prims.
   const selectedIdsRef = useRef<string[]>(selectedIds);
   // Currently-outlined meshes. The selection effect diffs against this set
-  // so a stable selection across drag ticks does no edge-renderer work.
-  // enableEdgesRendering rebuilds geometry on every call; blindly toggling
-  // it per frame is the dominant cost in multi-select gizmo drags.
-  const outlinedMeshesRef = useRef<Set<AbstractMesh>>(new Set());
+  // so a stable selection across drag ticks does no work. `renderOverlay` is
+  // an AbstractMesh property, but we keep this as Set<Mesh> since every
+  // outline target we add is a Mesh anyway (group transforms have no
+  // geometry to tint).
+  const outlinedMeshesRef = useRef<Set<Mesh>>(new Set());
   useEffect(() => {
     onDropRef.current = onShapeDropped;
   }, [onShapeDropped]);
@@ -265,6 +279,9 @@ export default function Viewport({
     snapEnabledRef.current = snapEnabled;
     ensureSnapRef.current();
   }, [snapEnabled]);
+  useEffect(() => {
+    dropEnabledRef.current = dropEnabled;
+  }, [dropEnabled]);
 
   // One-time scene setup.
   useEffect(() => {
@@ -602,6 +619,157 @@ export default function Viewport({
       onEndTransformBatchRef.current();
     };
 
+    // Group-rotate bookkeeping for the rotation gizmo. Mirrors the position
+    // group-move flow: capture each independent secondary's world pose at
+    // drag start, then on every tick rotate them by the primary's world-
+    // space delta quaternion around the primary's start pivot.
+    type GroupRotateEntry = {
+      mesh: AbstractMesh;
+      primId: string;
+      startWorldPos: Vector3;
+      startWorldRot: Quaternion;
+    };
+    let groupRotateStart: {
+      primaryStartPos: Vector3;
+      primaryStartRotInv: Quaternion;
+      others: GroupRotateEntry[];
+    } | null = null;
+
+    const onRotationDragStart = () => {
+      onBeginTransformBatchRef.current();
+      const primary = gizmoMgr.attachedMesh;
+      if (!primary) {
+        groupRotateStart = null;
+        return;
+      }
+      const primaryId = (primary.metadata as { primId?: string } | undefined)
+        ?.primId;
+      if (primaryId) draggingIdsRef.current.add(primaryId);
+      const all = selectedIdsRef.current;
+      if (!primaryId || all.length <= 1) {
+        groupRotateStart = null;
+        return;
+      }
+      const others: GroupRotateEntry[] = [];
+      for (const id of independentSelectedIds(all)) {
+        if (id === primaryId) continue;
+        const mesh = meshesRef.current.get(id);
+        if (!mesh) continue;
+        mesh.computeWorldMatrix(true);
+        others.push({
+          mesh,
+          primId: id,
+          startWorldPos: mesh.getAbsolutePosition().clone(),
+          startWorldRot: mesh.absoluteRotationQuaternion.clone()
+        });
+        draggingIdsRef.current.add(id);
+      }
+      if (others.length === 0) {
+        groupRotateStart = null;
+        return;
+      }
+      primary.computeWorldMatrix(true);
+      groupRotateStart = {
+        primaryStartPos: primary.getAbsolutePosition().clone(),
+        primaryStartRotInv: Quaternion.Inverse(
+          primary.absoluteRotationQuaternion
+        ),
+        others
+      };
+    };
+
+    const applyGroupRotate = () => {
+      const state = groupRotateStart;
+      if (!state) return;
+      const primary = gizmoMgr.attachedMesh;
+      if (!primary) return;
+      primary.computeWorldMatrix(true);
+      // World delta: primaryNow * inverse(primaryStart). Applied first to
+      // each secondary's world rotation and then to the offset vector from
+      // the primary's start pivot so the whole group rotates rigidly.
+      const deltaWorld = primary.absoluteRotationQuaternion.multiply(
+        state.primaryStartRotInv
+      );
+      const pivot = state.primaryStartPos;
+      for (const o of state.others) {
+        const offset = o.startWorldPos.subtract(pivot);
+        const rotatedOffset = new Vector3();
+        offset.rotateByQuaternionToRef(deltaWorld, rotatedOffset);
+        const targetWorldPos = pivot.add(rotatedOffset);
+        const targetWorldRot = deltaWorld.multiply(o.startWorldRot);
+        const parent = o.mesh.parent;
+        if (parent && parent instanceof TransformNode) {
+          parent.computeWorldMatrix(true);
+          const parentWorld = parent.getWorldMatrix();
+          const invParent = Matrix.Invert(parentWorld);
+          const localPos = Vector3.TransformCoordinates(
+            targetWorldPos,
+            invParent
+          );
+          o.mesh.position.copyFrom(localPos);
+          const parentScale = new Vector3();
+          const parentRot = new Quaternion();
+          const parentPos = new Vector3();
+          parentWorld.decompose(parentScale, parentRot, parentPos);
+          const localRot = Quaternion.Inverse(parentRot).multiply(targetWorldRot);
+          if (!o.mesh.rotationQuaternion) {
+            o.mesh.rotationQuaternion = new Quaternion();
+          }
+          o.mesh.rotationQuaternion.copyFrom(localRot);
+        } else {
+          o.mesh.position.copyFrom(targetWorldPos);
+          if (!o.mesh.rotationQuaternion) {
+            o.mesh.rotationQuaternion = new Quaternion();
+          }
+          o.mesh.rotationQuaternion.copyFrom(targetWorldRot);
+        }
+        o.mesh.computeWorldMatrix(true);
+      }
+    };
+
+    const onRotationDrag = () => {
+      applyGroupRotate();
+      commitFromMesh();
+    };
+
+    const onRotationDragEnd = () => {
+      applyGroupRotate();
+      commitFromMesh();
+      const state = groupRotateStart;
+      groupRotateStart = null;
+      const primaryMesh = gizmoMgr.attachedMesh;
+      const primaryId = (
+        primaryMesh?.metadata as { primId?: string } | undefined
+      )?.primId;
+      if (primaryId) draggingIdsRef.current.delete(primaryId);
+      if (!state) {
+        onEndTransformBatchRef.current();
+        return;
+      }
+      const updates: Array<{
+        id: string;
+        t: Partial<PrimTransform>;
+      }> = state.others.map((o) => {
+        const e = o.mesh.rotationQuaternion
+          ? o.mesh.rotationQuaternion.toEulerAngles()
+          : o.mesh.rotation;
+        return {
+          id: o.primId,
+          t: {
+            position: [
+              o.mesh.position.x,
+              o.mesh.position.y,
+              o.mesh.position.z
+            ],
+            rotation: [e.x, e.y, e.z]
+          }
+        };
+      });
+      for (const o of state.others) draggingIdsRef.current.delete(o.primId);
+      onTransformManyRef.current(updates);
+      onEndTransformBatchRef.current();
+    };
+
     // Gizmos are lazily (re-)created when the manager enables them, so we
     // re-apply snap and hook the commit callback whenever a new gizmo instance shows up.
     ensureSnapRef.current = () => {
@@ -624,12 +792,9 @@ export default function Viewport({
           // mesh's rotation when its scale is non-uniform and the drag stops
           // responding; world-aligned rings sidestep that entirely.
           r.updateGizmoRotationToMatchAttachedMesh = false;
-          r.onDragStartObservable.add(markAttachedDragging);
-          r.onDragStartObservable.add(() => onBeginTransformBatchRef.current());
-          r.onDragObservable.add(commitFromMesh);
-          r.onDragEndObservable.add(unmarkAttachedDragging);
-          r.onDragEndObservable.add(commitFromMesh);
-          r.onDragEndObservable.add(() => onEndTransformBatchRef.current());
+          r.onDragStartObservable.add(onRotationDragStart);
+          r.onDragObservable.add(onRotationDrag);
+          r.onDragEndObservable.add(onRotationDragEnd);
           lastRotationGizmoRef.current = r;
         }
       }
@@ -842,10 +1007,20 @@ export default function Viewport({
 
     const onResize = () => engine.resize();
     window.addEventListener('resize', onResize);
+    // Babylon's built-in resize handling only listens to the window. When
+    // our grid layout changes (e.g. Scene Editor mode hiding the bottom
+    // palette) the canvas's client size changes without a window resize,
+    // so without this observer the engine keeps its old draw-buffer
+    // dimensions and the rendered image stretches/skews into the new box.
+    const ro = new ResizeObserver(onResize);
+    ro.observe(canvas);
 
     // HTML5 drop wiring: drop on the canvas, pick the ground at the cursor,
     // hand the world position back so a prim can be appended to the model.
+    // Both listeners short-circuit when `dropEnabledRef` is false so Scene
+    // Editor mode can refuse drops without re-binding the listeners.
     const onDragOver = (ev: DragEvent) => {
+      if (!dropEnabledRef.current) return;
       const types = ev.dataTransfer?.types;
       if (!types) return;
       if (types.includes(SHAPE_DRAG_MIME) || types.includes(ASSET_DRAG_MIME)) {
@@ -854,6 +1029,7 @@ export default function Viewport({
       }
     };
     const onDrop = (ev: DragEvent) => {
+      if (!dropEnabledRef.current) return;
       const dt = ev.dataTransfer;
       if (!dt) return;
       const assetId = dt.getData(ASSET_DRAG_MIME);
@@ -886,6 +1062,7 @@ export default function Viewport({
       canvas.removeEventListener('drop', onDrop);
       canvas.removeEventListener('contextmenu', onCanvasContextMenu);
       window.removeEventListener('resize', onResize);
+      ro.disconnect();
       meshesRef.current.clear();
       materialsRef.current.clear();
       sceneRef.current = null;
@@ -901,6 +1078,7 @@ export default function Viewport({
       measureEndSphereRef.current = null;
       measureLineRef.current = null;
       gizmoMgr.dispose();
+      outlinedMeshesRef.current.clear();
       engine.dispose();
     };
   }, []);
@@ -1048,11 +1226,13 @@ export default function Viewport({
         ? subMeshRegistryRef.current.get(selectedMeshUid) ?? null
         : null;
 
-    // Build the desired outlined-mesh set. Anything with geometry is fair
-    // game; meshes with zero vertices (e.g. asset group transforms) are
-    // skipped because enableEdgesRendering would no-op on them anyway.
-    const desired = new Set<AbstractMesh>();
+    // Build the desired outlined-mesh set. HighlightLayer.addMesh requires
+    // a Mesh; group transforms and non-Mesh AbstractMesh subclasses are
+    // skipped. Empty-geometry meshes are skipped too (no silhouette to
+    // render).
+    const desired = new Set<Mesh>();
     const addOutlineTarget = (m: AbstractMesh): void => {
+      if (!(m instanceof Mesh)) return;
       if (m.getTotalVertices() === 0) return;
       desired.add(m);
     };
@@ -1077,22 +1257,21 @@ export default function Viewport({
     }
 
     // Diff against the previous outlined set so a stable selection across
-    // drag ticks (effect re-runs every time `prims` changes) does ZERO edge-
-    // renderer work. enableEdgesRendering rebuilds geometry on every call,
-    // so blindly toggling it per frame for multi-selection was the main
-    // source of multi-select slowdown.
+    // drag ticks (effect re-runs every time `prims` changes) does no
+    // overlay work. `renderOverlay = true` adds one extra draw call per
+    // mesh per frame (solid-color pass with alpha) — toggling it is just a
+    // flag flip, no CPU geometry work like enableEdgesRendering had.
     const prev = outlinedMeshesRef.current;
     for (const m of prev) {
       if (!desired.has(m)) {
-        // Mesh may have been disposed during reconcile; guard the call.
-        if (!m.isDisposed() && m.edgesRenderer) m.disableEdgesRendering();
+        if (!m.isDisposed()) m.renderOverlay = false;
       }
     }
     for (const m of desired) {
       if (!prev.has(m)) {
-        m.enableEdgesRendering();
-        m.edgesWidth = SELECTION_EDGE_WIDTH;
-        m.edgesColor = SELECTION_COLOR;
+        m.overlayColor = SELECTION_COLOR;
+        m.overlayAlpha = SELECTION_OVERLAY_ALPHA;
+        m.renderOverlay = true;
       }
     }
     outlinedMeshesRef.current = desired;
@@ -1295,6 +1474,69 @@ function parseHexColor(hex: string): { color: Color3; alpha: number } {
   return { color: new Color3(0.7, 0.7, 0.72), alpha: 1 };
 }
 
+// Per-scene cache of parsed asset containers, keyed by resolved URL. The
+// container is held OFF-scene (we never call addAllToScene); each load
+// clones from it via instantiateModelsToScene, which shares GPU geometry
+// (Mesh.clone reuses the source Geometry instance) and shares materials/
+// textures (cloneMaterials=false). One OBJ/GLB parse + texture upload is
+// reused for N instances of the same asset — the dominant cost when a
+// scene contains many copies of e.g. HospitalBed.obj. WeakMap so disposing
+// the scene auto-evicts the cache.
+const assetContainerCachesByScene = new WeakMap<
+  Scene,
+  Map<string, Promise<AssetContainer>>
+>();
+
+function getOrLoadAssetContainer(
+  scene: Scene,
+  cacheKey: string,
+  rootUrl: string,
+  fileName: string,
+  pluginExtension: string | undefined
+): Promise<AssetContainer> {
+  let cache = assetContainerCachesByScene.get(scene);
+  if (!cache) {
+    cache = new Map();
+    assetContainerCachesByScene.set(scene, cache);
+  }
+  let pending = cache.get(cacheKey);
+  if (pending) return pending;
+  pending = (async () => {
+    const container = await SceneLoader.LoadAssetContainerAsync(
+      rootUrl,
+      fileName,
+      scene,
+      null,
+      pluginExtension
+    );
+    // Sanitize ONCE on the cached template. Clones share materials
+    // (cloneMaterials=false) so this fix-up flows to every instance.
+    // createNormals modifies the source Geometry, which is also shared
+    // across clones, so recomputed normals stick everywhere.
+    for (const m of container.meshes) {
+      if (m instanceof Mesh) {
+        if (m.material) m.material.fillMode = Material.TriangleFillMode;
+        if (
+          !m.isVerticesDataPresent(VertexBuffer.NormalKind) &&
+          m.getTotalVertices() > 0 &&
+          m.getTotalIndices() > 0
+        ) {
+          m.createNormals(true);
+        }
+      }
+      sanitizeReferenceMaterial(m.material);
+    }
+    return container;
+  })().catch((err) => {
+    // Don't poison the cache with a rejected promise — next attempt should
+    // be allowed to retry.
+    cache!.delete(cacheKey);
+    throw err;
+  });
+  cache.set(cacheKey, pending);
+  return pending;
+}
+
 async function loadGltfReference(
   parent: Mesh,
   assetSource: string,
@@ -1314,52 +1556,42 @@ async function loadGltfReference(
   // `assetSource` (e.g. ".glb") and pass it as pluginExtension.
   const sourceExt = assetSource.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase();
   const pluginExtension = url.startsWith('blob:') ? sourceExt : undefined;
+  // blob: URLs are one-shot handles produced by URL.createObjectURL; each
+  // generated URL is unique to a single fetch, so caching by URL is
+  // meaningless. Key those by assetSource so user-library files still
+  // benefit from per-source reuse across instances.
+  const cacheKey = url.startsWith('blob:') ? `src:${assetSource}` : url;
   try {
-    // LoadAssetContainerAsync loads the meshes into an off-scene container
-    // so we can parent + configure them BEFORE they ever get rendered.
-    // ImportMeshAsync adds meshes to the scene immediately and would briefly
-    // render at world scale 1 (huge) before our parent reassignment applies
-    // the asset's metersPerUnit / inch->meter scale fix.
-    const container = await SceneLoader.LoadAssetContainerAsync(
+    const container = await getOrLoadAssetContainer(
+      scene,
+      cacheKey,
       rootUrl,
       fileName,
-      scene,
-      null,
       pluginExtension
     );
     // The reference prim may have been removed before the load finished.
-    if (parent.isDisposed()) {
-      container.dispose();
-      return;
+    if (parent.isDisposed()) return;
+    // Clone (not InstancedMesh) so per-instance Mesh state — renderOverlay
+    // color/alpha for selection, picking metadata — stays independent.
+    // doNotInstantiate=true and cloneMaterials=false: each instance is a
+    // fresh Mesh sharing the source Geometry (cheap, GPU buffers reused)
+    // and the sanitized source Material (no per-instance texture upload).
+    const entries = container.instantiateModelsToScene(
+      undefined,
+      false,
+      { doNotInstantiate: true }
+    );
+    for (const root of entries.rootNodes) {
+      root.parent = parent;
     }
-    for (const m of container.meshes) {
-      if (!m.parent) m.parent = parent;
-      // Tag every loaded mesh so viewport clicks resolve back to the prim.
-      m.metadata = { ...(m.metadata ?? {}), primId };
-      // Force triangle rendering in case the loader left a non-triangle
-      // fillMode behind (some OBJ paths default to point cloud when index
-      // generation goes wrong).
-      if (m instanceof Mesh) {
-        if (m.material) m.material.fillMode = Material.TriangleFillMode;
-        if (
-          !m.isVerticesDataPresent(VertexBuffer.NormalKind) &&
-          m.getTotalVertices() > 0 &&
-          m.getTotalIndices() > 0
-        ) {
-          m.createNormals(true);
-        }
-      }
-      sanitizeReferenceMaterial(m.material);
-    }
-    // Commit the fully-configured nodes to the scene in one atomic step,
-    // so the first frame they appear in is already correctly scaled.
-    container.addAllToScene();
     // Remember which source produced these children so a later edit triggers a reload.
     parent.metadata = { ...(parent.metadata ?? {}), primId, loadedSource: assetSource };
     // Drop any stale sub-mesh registrations from a previous load of this prim,
     // then walk the (potentially nested) loaded hierarchy under `parent` and
     // publish it as an AssetMeshNode tree so the Hierarchy panel can render
-    // the asset's internal structure.
+    // the asset's internal structure. buildAssetMeshNode also tags every
+    // node with `metadata.primId` (and meshes with `assetMeshUid`), which
+    // is what viewport picks rely on to resolve clicks back to this prim.
     clearSubMeshRegistry(subMeshRegistry, primId);
     const tree = buildAssetMeshTree(parent, primId, subMeshRegistry);
     onAssetMeshesLoaded(tree);

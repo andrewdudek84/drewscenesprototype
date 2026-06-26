@@ -1,5 +1,5 @@
 import { ASSET_LIBRARY } from '../assets';
-import { ASSET_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
+import { ASSET_DRAG_MIME } from '../shapes';
 import PaletteImporter from './PaletteImporter';
 
 export default function AssetsPalette() {
@@ -12,16 +12,6 @@ export default function AssetsPalette() {
     e.dataTransfer.effectAllowed = 'copy';
   };
 
-  // The Group entry is a synthetic palette item that creates an empty
-  // "Asset" container prim (ShapeKind === 'group') via the shape-drag
-  // pipeline. It lives in the Assets tab because users think of groups as
-  // a way to compose assets, not as a primitive shape.
-  const onGroupDragStart = (e: React.DragEvent<HTMLDivElement>) => {
-    e.dataTransfer.setData(SHAPE_DRAG_MIME, 'group');
-    e.dataTransfer.setData('text/plain', 'group');
-    e.dataTransfer.effectAllowed = 'copy';
-  };
-
   return (
     <div className="palette-items">
       <PaletteImporter
@@ -29,19 +19,16 @@ export default function AssetsPalette() {
         dragMime={ASSET_DRAG_MIME}
         importTitle="Import a .usd / .usda asset from your computer"
       />
-      <div
-        className="palette-item"
-        draggable
-        onDragStart={onGroupDragStart}
-        title="Drag Group into the viewport to create an empty Asset container"
-      >
-        <span className="palette-icon kind-group" aria-hidden="true" />
-        <span className="palette-label">Blank</span>
-      </div>
-      {ASSET_LIBRARY.length === 0 ? (
-        <div className="palette-empty">No assets in usd_assets/.</div>
-      ) : (
-        ASSET_LIBRARY.map((a) => (
+      {(() => {
+        // Pin Placeholder to the slot directly after the Import button,
+        // since "empty container" is a frequently used building block and
+        // alphabetical ordering would bury it in the middle of the list.
+        const placeholder = ASSET_LIBRARY.find((a) => a.id === 'Placeholder');
+        const rest = ASSET_LIBRARY.filter((a) => a.id !== 'Placeholder');
+        if (ASSET_LIBRARY.length === 0) {
+          return <div className="palette-empty">No assets in usd_assets/.</div>;
+        }
+        const renderItem = (a: { id: string; label: string }) => (
           <div
             key={a.id}
             className="palette-item"
@@ -52,8 +39,14 @@ export default function AssetsPalette() {
             <AssetIcon id={a.id} />
             <span className="palette-label">{a.label}</span>
           </div>
-        ))
-      )}
+        );
+        return (
+          <>
+            {placeholder && renderItem(placeholder)}
+            {rest.map(renderItem)}
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -297,6 +290,31 @@ export function AssetIcon({ id }: { id: string }) {
           {/* Door swing cue */}
           <path d="M11 23 A6 6 0 0 1 17 17" stroke="#9aa3b0" strokeDasharray="1.4 1.4" />
         </g>
+      </svg>
+    );
+  }
+  if (id === 'Placeholder') {
+    // Dashed empty container — signals "named group with nothing inside yet".
+    return (
+      <svg
+        viewBox="0 0 28 28"
+        width="28"
+        height="28"
+        aria-hidden="true"
+        className="palette-icon-svg"
+      >
+        <rect
+          x="5"
+          y="5"
+          width="18"
+          height="18"
+          rx="2"
+          ry="2"
+          fill="none"
+          stroke="#7a8290"
+          strokeWidth="1.2"
+          strokeDasharray="2.5 2"
+        />
       </svg>
     );
   }

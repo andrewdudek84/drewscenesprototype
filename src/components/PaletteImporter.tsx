@@ -38,6 +38,14 @@ export default function PaletteImporter({ palette, dragMime, importTitle }: Prop
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
+    const MAX_IMPORT_BYTES = 250 * 1024 * 1024;
+    if (file.size > MAX_IMPORT_BYTES) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      alert(
+        `"${file.name}" is ${sizeMb} MB. Imports are limited to 250 MB.`
+      );
+      return;
+    }
     setBusy(true);
     try {
       const ext = (file.name.match(/\.[a-z0-9]+$/i)?.[0] ?? '').toLowerCase();

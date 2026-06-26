@@ -79,6 +79,15 @@ canvas {
     "ontology  palette";
 }
 
+/* Scene Editor mode hides the BottomPanel (shapes/assets palette), so drop
+ * the third row entirely and let the viewport span the remaining height. */
+.layout.is-scene-editor {
+  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-areas:
+    "topbar    topbar"
+    "ontology  viewport";
+}
+
 .viewport-area {
   grid-area: viewport;
   position: relative;
@@ -117,16 +126,27 @@ canvas {
   min-width: 0;
 }
 
-.left-stack > .panel.models {
-  flex: 0 0 30%;
-  min-height: 0;
-  /* Drop the default `.panel` top border — the topbar already has a
-   *  matching `border-bottom`, so without this we'd render two stacked
-   *  1px lines. Add a right border so the panel terminates cleanly against
-   *  the viewport (the bottom .ontology panel sets its own right border). */
+.left-stack > .panel {
+  /* Stacked left-rail panels share a single column terminator on the right
+   *  and inter-panel separators along the bottom. Top and left borders are
+   *  suppressed so we don't render two stacked 1px lines against the
+   *  topbar's bottom edge, the screen edge, or each panel boundary
+   *  (adjacent panels would otherwise stack `border-bottom` + `border-top`
+   *  into a visible 2px seam). */
+  border-left: none;
   border-top: none;
   border-right: 1px solid var(--panel-border);
   border-bottom: 1px solid var(--panel-border);
+}
+
+.left-stack > .panel.conditions {
+  flex: 0 0 220px;
+  min-height: 0;
+}
+
+.left-stack > .panel.models {
+  flex: 0 0 30%;
+  min-height: 0;
 }
 
 .left-stack > .panel.ontology {
@@ -136,6 +156,10 @@ canvas {
 
 .panel.palette {
   grid-area: palette;
+  /* The left-stack's column-terminator border already separates this panel
+   *  from the ontology column, so omit our own left border to avoid a 2px
+   *  seam where the two meet. */
+  border-left: none;
 }
 
 .panel.properties {
@@ -164,7 +188,7 @@ canvas {
 .topbar {
   grid-area: topbar;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -179,6 +203,42 @@ canvas {
   gap: 10px;
   min-width: 0;
   justify-self: start;
+}
+
+.topbar-center {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  justify-self: center;
+}
+
+.mode-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.mode-btn:hover {
+  color: var(--text);
+  background: var(--hover-bg);
+}
+
+.mode-btn.is-active {
+  color: var(--text);
+  background: var(--panel-bg-elev);
+  border-color: var(--panel-border);
 }
 
 .brand-logo {
@@ -678,6 +738,62 @@ html[data-theme='light'] .panel.toolbar {
   padding: 6px 8px;
 }
 
+.panel-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 0 6px;
+}
+
+.panel-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 24px 4px 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  outline: none;
+}
+
+.panel-search-input::placeholder {
+  color: var(--text-dim);
+}
+
+.panel-search-input:focus {
+  border-color: var(--accent);
+}
+
+.panel-search-input[type='search']::-webkit-search-cancel-button {
+  display: none;
+}
+
+.panel-search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  border-radius: 3px;
+}
+
+.panel-search-clear:hover {
+  color: var(--text);
+  background: var(--hover-bg);
+}
+
 /* ---------- Hierarchy tree ---------- */
 
 .tree,
@@ -826,6 +942,29 @@ html[data-theme='light'] .panel.toolbar {
   color: var(--text);
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.tree-count {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--panel-elev, rgba(127, 127, 127, 0.15));
+  border-radius: 8px;
+  user-select: none;
+}
+
+.tree-node.is-selected .tree-count {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.18);
 }
 
 .tree-delete {
@@ -1153,15 +1292,15 @@ html[data-theme='light'] .panel.toolbar {
   box-sizing: content-box;
   margin: 0;
   color: var(--text);
-  background: #cfe4f7;
+  background: var(--panel-bg-elev);
   border-style: dashed;
-  border-color: #7aaedd;
+  border-color: var(--panel-border);
   cursor: pointer;
 }
 
 .palette-import-tile:hover:not(:disabled) {
   border-color: var(--accent);
-  background: #b8d6f0;
+  background: var(--hover-bg);
 }
 
 .palette-import-tile:disabled {
@@ -1178,7 +1317,7 @@ html[data-theme='light'] .panel.toolbar {
   font-size: 22px;
   font-weight: 300;
   line-height: 1;
-  color: #2a6ea8;
+  color: var(--accent);
 }
 
 .palette-label {
@@ -1239,6 +1378,21 @@ html[data-theme='light'] .panel.toolbar {
 
 /* ---------- Properties panel ---------- */
 
+/* Browsers add a border + inline padding + min-width to <fieldset> by default.
+ * We use the element purely as a no-styling wrapper that natively disables
+ * every form control inside when scene-editor mode passes disabled. The
+ * `disabled` rule adds a subtle dim so users see the panel is non-editable. */
+.props-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.props-fieldset[disabled] {
+  opacity: 0.85;
+}
+
 .props-empty {
   color: var(--text-dim);
   font-style: italic;
@@ -1252,6 +1406,10 @@ html[data-theme='light'] .panel.toolbar {
 }
 
 .props-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 6px;
   padding: 4px 6px 2px;
   border-top: 1px solid var(--border);
@@ -1259,6 +1417,108 @@ html[data-theme='light'] .panel.toolbar {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-dim);
+}
+
+.props-section-add {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.props-section-add:hover {
+  background: var(--hover-bg);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.view-rule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.view-rule {
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 6px 8px 8px;
+  background: var(--panel-bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.view-rule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.view-rule-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+
+.view-rule-remove:hover {
+  background: var(--hover-bg);
+  color: #ff6b6b;
+}
+
+.props-input.is-invalid {
+  border-color: #ff6b6b;
+}
+
+.condition-icon-picker {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.condition-icon-chip {
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  box-sizing: border-box;
+}
+
+.condition-icon-chip.is-clickable {
+  cursor: pointer;
+}
+
+.condition-icon-chip:not(.is-selected).is-clickable:hover {
+  border-color: var(--panel-border);
+}
+
+.condition-icon-chip.is-selected {
+  border-color: var(--accent);
 }
 
 .props-row {

@@ -1,6 +1,12 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import InlineNameEdit from './InlineNameEdit';
-import { PRIM_DRAG_MIME } from '../shapes';
+import {
+  PRIM_DRAG_MIME,
+  ASSET_DRAG_MIME,
+  encodeDragIds,
+  decodeDragIds
+} from '../shapes';
+import { ASSET_LIBRARY } from '../assets';
 import type { OntologyNode, SpatialBinding } from '../ontology';
 
 export const ENTITY_INSTANCE_DRAG_MIME = 'application/x-entity-instance-id';
@@ -12,6 +18,29 @@ function filterUsdChildren(nodes: OntologyNode[]): OntologyNode[] {
   return nodes
     .filter((n) => n.entity.type !== 'USD')
     .map((n) => ({ entity: n.entity, children: filterUsdChildren(n.children) }));
+}
+
+/** Filter the instance tree to entities whose name or type matches `q`
+ *  (case-insensitive substring) OR have a descendant that matches.
+ *  Non-matching branches are pruned; matching ancestors are kept so the
+ *  hierarchy path stays coherent. */
+function filterInstancesByQuery(
+  nodes: OntologyNode[],
+  q: string
+): OntologyNode[] {
+  if (!q) return nodes;
+  const needle = q.toLowerCase();
+  const out: OntologyNode[] = [];
+  for (const n of nodes) {
+    const selfMatch =
+      n.entity.name.toLowerCase().includes(needle) ||
+      n.entity.type.toLowerCase().includes(needle);
+    const filteredChildren = filterInstancesByQuery(n.children, q);
+    if (selfMatch || filteredChildren.length > 0) {
+      out.push({ entity: n.entity, children: filteredChildren });
+    }
+  }
+  return out;
 }
 
 interface Props {
@@ -29,6 +58,21 @@ interface Props {
    *  added without losing track of the gizmo's primary target. */
   selectedEntityIds: string[];
   onBind: (entityId: string, binding: SpatialBinding) => void;
+  /** Fires when a USDA asset (from the palette) or a scene prim is dropped
+   *  onto a non-USD instance row. Creates a USD entity holding `usdPath`
+   *  and a HasUSD edge from the instance to it. If the instance already has
+   *  an outgoing HasUSD edge, the existing target USD entity is updated in
+   *  place (path swap) instead. */
+  onAttachUsd: (
+    instanceId: string,
+    usdPath: string,
+    suggestedName?: string
+  ) => void;
+  /** Fires when a scene prim is dropped onto a non-USD instance row.
+   *  Unlike `onAttachUsd` (which spawns a fresh prim from a USDA path),
+   *  this rebinds the instance's USD child to the *actual* dragged prim
+   *  and deletes whatever prim was previously bound. */
+  onRebindUsdPrim: (instanceId: string, sourcePrimId: string) => void;
   /** Fires when the user clicks a bound USD row, so App can flip
    *  selection over to the bound prim (driving viewport gizmo + properties).
    *  `additive` (Ctrl/Cmd+click) toggles the row into the multi-selection
@@ -59,6 +103,11 @@ interface Props {
    *  is allowed by the model. Invalid drops are refused and shake the row to
    *  signal "no" instead of silently mutating the tree. */
   canReparent: (entityId: string, newParentId: string | null) => boolean;
+  /** When true the panel hides authoring affordances: the "+" header
+   *  button, right-click context menus, inline rename, and drag-drop
+   *  reparenting / binding / USD attach. Click-to-select and
+   *  expand/collapse remain interactive. */
+  readOnly?: boolean;
 }
 
 export default function OntologyPanel({
@@ -67,6 +116,8 @@ export default function OntologyPanel({
   selectedEntityId,
   selectedEntityIds,
   onBind,
+  onAttachUsd,
+  onRebindUsdPrim,
   onSelectEntity,
   resolvePrimAsAsset,
   onAddInstance,
@@ -75,17 +126,24 @@ export default function OntologyPanel({
   onCommitRename,
   onCancelRename,
   onReparent,
-  canReparent
+  canReparent,
+  readOnly = false
 }: Props) {
   const dragRef = useRef<InstanceDragInfo | null>(null);
   const [rootDropOver, setRootDropOver] = useState(false);
   const [rootShake, setRootShake] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const trimmedQuery = searchQuery.trim();
+  const isSearching = trimmedQuery.length > 0;
 
   // Visible tree: hide USD-type children. The parent row absorbs them in UX
   // (its Properties panel shows the merged USD section). The underlying
   // ontology schema is unchanged — `descendantsById` below still walks the
   // full tree so reparent drag-drop respects every node.
-  const visibleRoots = useMemo(() => filterUsdChildren(roots), [roots]);
+  const visibleRoots = useMemo(() => {
+    const hidden = filterUsdChildren(roots);
+    return isSearching ? filterInstancesByQuery(hidden, trimmedQuery) : hidden;
+  }, [roots, isSearching, trimmedQuery]);
 
   // Lookup: id -> set of descendant ids (inclusive). Used to refuse a drop
   // onto self or any descendant when reparenting via drag-drop.
@@ -113,16 +171,20 @@ export default function OntologyPanel({
   }, [roots]);
 
   const onBgContextMenu = (ev: React.MouseEvent) => {
+    if (readOnly) return;
     if (ev.target !== ev.currentTarget) return;
     ev.preventDefault();
     onContextMenu(null, ev.clientX, ev.clientY);
   };
 
   const onRootDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     if (!ev.dataTransfer.types.includes(ENTITY_INSTANCE_DRAG_MIME)) return;
     ev.preventDefault();
-    const draggedId = dragRef.current?.id;
-    if (draggedId && !canReparent(draggedId, null)) {
+    const drag = dragRef.current;
+    // Allow the drop if ANY dragged entity can move to root; the drop
+    // handler filters out the rest. If none can, refuse with dropEffect=none.
+    if (drag && !drag.ids.some((id) => canReparent(id, null))) {
       ev.dataTransfer.dropEffect = 'none';
       setRootDropOver(false);
       return;
@@ -132,17 +194,22 @@ export default function OntologyPanel({
   };
   const onRootDragLeave = () => setRootDropOver(false);
   const onRootDrop = (ev: React.DragEvent) => {
+    if (readOnly) return;
     setRootDropOver(false);
-    const id = ev.dataTransfer.getData(ENTITY_INSTANCE_DRAG_MIME);
-    if (!id) return;
+    const raw = ev.dataTransfer.getData(ENTITY_INSTANCE_DRAG_MIME);
+    const ids = decodeDragIds(raw);
+    if (ids.length === 0) return;
     ev.preventDefault();
     ev.stopPropagation();
-    if (!canReparent(id, null)) {
+    const allowed = ids.filter((id) => canReparent(id, null));
+    if (allowed.length === 0) {
       setRootShake(true);
       dragRef.current = null;
       return;
     }
-    onReparent(id, null);
+    // Each setOntologyDoc updater chains through the React 18 batch so all
+    // moves land in one render + one undo entry.
+    for (const id of allowed) onReparent(id, null);
     dragRef.current = null;
   };
 
@@ -150,28 +217,51 @@ export default function OntologyPanel({
     <aside className="panel ontology">
       <header className="panel-header panel-header-with-actions">
         <span>Entity Instances</span>
-        <button
-          type="button"
-          className="panel-header-btn"
-          title="Add instance"
-          aria-label="Add entity instance"
-          onClick={(ev) => {
-            const rect = ev.currentTarget.getBoundingClientRect();
-            onAddInstance(rect.left, rect.bottom);
-          }}
-        >
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path
-              d="M8 3 V13 M3 8 H13"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-            />
-          </svg>
-        </button>
+        {!readOnly && (
+          <button
+            type="button"
+            className="panel-header-btn"
+            title="Add instance"
+            aria-label="Add entity instance"
+            onClick={(ev) => {
+              const rect = ev.currentTarget.getBoundingClientRect();
+              onAddInstance(rect.left, rect.bottom);
+            }}
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path
+                d="M8 3 V13 M3 8 H13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        )}
       </header>
       <div className="panel-body" onContextMenu={onBgContextMenu}>
+        <div className="panel-search">
+          <input
+            type="search"
+            className="panel-search-input"
+            placeholder="Search instances…"
+            value={searchQuery}
+            onChange={(ev) => setSearchQuery(ev.target.value)}
+            aria-label="Search entity instances"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              className="panel-search-clear"
+              title="Clear search"
+              aria-label="Clear search"
+              onClick={() => setSearchQuery('')}
+            >
+              ×
+            </button>
+          )}
+        </div>
         <ul
           className={
             'tree' +
@@ -187,7 +277,9 @@ export default function OntologyPanel({
           }}
         >
           {visibleRoots.length === 0 ? (
-            <li className="tree-empty">No ontology instances.</li>
+            <li className="tree-empty">
+              {isSearching ? 'No matching instances.' : 'No ontology instances.'}
+            </li>
           ) : (
             visibleRoots.map((n) => (
               <OntologyTreeNode
@@ -198,6 +290,8 @@ export default function OntologyPanel({
                 selectedEntityIds={selectedEntityIds}
                 resolvePrimAsAsset={resolvePrimAsAsset}
                 onBind={onBind}
+                onAttachUsd={onAttachUsd}
+                onRebindUsdPrim={onRebindUsdPrim}
                 onSelectEntity={onSelectEntity}
                 onContextMenu={onContextMenu}
                 editingId={editingId}
@@ -208,6 +302,8 @@ export default function OntologyPanel({
                 dragRef={dragRef}
                 descendantsById={descendantsById}
                 depth={0}
+                forceExpand={isSearching}
+                readOnly={readOnly}
               />
             ))
           )}
@@ -218,7 +314,11 @@ export default function OntologyPanel({
 }
 
 interface InstanceDragInfo {
-  id: string;
+  // All ids being dragged in this gesture (multi-select aware). Single-drag
+  // is just a length-1 array.
+  ids: string[];
+  // Union of every dragged id's descendant set (inclusive). Used to refuse
+  // a drop onto self or any descendant of any dragged item.
   descendants: Set<string>;
 }
 
@@ -229,6 +329,8 @@ interface NodeProps {
   selectedEntityIds: string[];
   resolvePrimAsAsset: Props['resolvePrimAsAsset'];
   onBind: (entityId: string, binding: SpatialBinding) => void;
+  onAttachUsd: Props['onAttachUsd'];
+  onRebindUsdPrim: Props['onRebindUsdPrim'];
   onSelectEntity: (entityId: string, additive?: boolean) => void;
   onContextMenu: (entityId: string | null, x: number, y: number) => void;
   editingId: string | null;
@@ -242,6 +344,13 @@ interface NodeProps {
    * default-expand only the root rows so duplicates and deep trees don't
    * blow open on first render. */
   depth: number;
+  /** When true, the node renders expanded regardless of local toggle state.
+   *  Used while a search query is active so matches deep in the tree are
+   *  visible without the user expanding every ancestor manually. */
+  forceExpand?: boolean;
+  /** Authoring affordances (drag-drop reparent, binding, USD attach,
+   *  right-click menu, inline rename) are suppressed when true. */
+  readOnly?: boolean;
 }
 
 function OntologyTreeNode({
@@ -251,6 +360,8 @@ function OntologyTreeNode({
   selectedEntityIds,
   resolvePrimAsAsset,
   onBind,
+  onAttachUsd,
+  onRebindUsdPrim,
   onSelectEntity,
   onContextMenu,
   editingId,
@@ -260,10 +371,13 @@ function OntologyTreeNode({
   canReparent,
   dragRef,
   descendantsById,
-  depth
+  depth,
+  forceExpand = false,
+  readOnly = false
 }: NodeProps) {
   const hasChildren = node.children.length > 0;
   const [expanded, setExpanded] = useState(depth === 0);
+  const effectiveExpanded = forceExpand || expanded;
   const [dragOver, setDragOver] = useState(false);
   const [shake, setShake] = useState(false);
   const isSpatial = node.entity.type === 'USD';
@@ -271,6 +385,30 @@ function OntologyTreeNode({
   const isInMultiSelection =
     !isSelected && selectedEntityIds.includes(node.entity.id);
   const isEditing = editingId === node.entity.id;
+  // Auto-expand whenever the selection (single or multi) lands on any of
+  // this node's descendants, so newly-created children and viewport picks
+  // are revealed even if their parent was collapsed.
+  const descendantSet = descendantsById.get(node.entity.id);
+  const containsSelection =
+    hasChildren &&
+    !!descendantSet &&
+    ((selectedEntityId !== null &&
+      selectedEntityId !== node.entity.id &&
+      descendantSet.has(selectedEntityId)) ||
+      selectedEntityIds.some(
+        (id) => id !== node.entity.id && descendantSet.has(id)
+      ));
+  useEffect(() => {
+    if (containsSelection) setExpanded(true);
+  }, [containsSelection]);
+  // Scroll the selected row into view so picks made elsewhere (viewport,
+  // Hierarchy, Properties round-trips) reveal the matching ontology row.
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (isSelected && rowRef.current) {
+      rowRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }, [isSelected]);
   // All instance rows are clickable: clicking routes through App, which
   // shows the entity's properties form and (for bound USD rows) also
   // focuses the bound prim in the viewport.
@@ -282,24 +420,58 @@ function OntologyTreeNode({
   };
 
   const onInstanceDragStart = (ev: React.DragEvent) => {
+    if (readOnly) return;
     ev.stopPropagation();
-    ev.dataTransfer.setData(ENTITY_INSTANCE_DRAG_MIME, node.entity.id);
+    // If this row is part of the current multi-selection, drag the whole
+    // set so a single drop reparents every selected instance. Otherwise
+    // drag just this row.
+    const draggedIds =
+      selectedEntityIds.includes(node.entity.id) &&
+      selectedEntityIds.length > 1
+        ? selectedEntityIds
+        : [node.entity.id];
+    ev.dataTransfer.setData(
+      ENTITY_INSTANCE_DRAG_MIME,
+      encodeDragIds(draggedIds)
+    );
     ev.dataTransfer.effectAllowed = 'move';
-    dragRef.current = {
-      id: node.entity.id,
-      descendants:
-        descendantsById.get(node.entity.id) ?? new Set([node.entity.id])
-    };
+    // Union of every dragged id's descendants (each set is inclusive of the
+    // id itself) so onDragOver / onDrop can refuse drops onto self-or-descendant
+    // of ANY dragged item.
+    const descendants = new Set<string>();
+    for (const id of draggedIds) {
+      const d = descendantsById.get(id);
+      if (d) for (const x of d) descendants.add(x);
+      else descendants.add(id);
+    }
+    dragRef.current = { ids: draggedIds, descendants };
   };
   const onInstanceDragEnd = () => {
     dragRef.current = null;
   };
 
-  // Row accepts two unrelated drag sources: USD binding (prim drop
-  // from Viewport/Hierarchy) and instance reparenting (drag from this panel).
+  // Row accepts three drag sources:
+  //  - USD binding (PRIM_DRAG_MIME on a USD-typed row) — sets the runtime
+  //    binding map for prim<->SpatialItem.
+  //  - USD attach (PRIM_DRAG_MIME or ASSET_DRAG_MIME on a non-USD instance
+  //    row) — upserts a HasUSD edge from this instance to a USD entity
+  //    holding the dropped asset's USDA path.
+  //  - Instance reparenting (ENTITY_INSTANCE_DRAG_MIME).
+  const acceptsUsdAttach = !isSpatial;
   const onDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     const types = ev.dataTransfer.types;
     if (isSpatial && types.includes(PRIM_DRAG_MIME)) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.dataTransfer.dropEffect = 'link';
+      setDragOver(true);
+      return;
+    }
+    if (
+      acceptsUsdAttach &&
+      (types.includes(ASSET_DRAG_MIME) || types.includes(PRIM_DRAG_MIME))
+    ) {
       ev.preventDefault();
       ev.stopPropagation();
       ev.dataTransfer.dropEffect = 'link';
@@ -311,11 +483,10 @@ function OntologyTreeNode({
       if (drag && drag.descendants.has(node.entity.id)) return;
       ev.preventDefault();
       ev.stopPropagation();
-      // Refuse drops the model wouldn't allow (no matching HasChild edge
-      // between parent and child types). We still preventDefault so onDrop
-      // fires and we can shake the row — silently swallowing the drop here
-      // would leave the user with no feedback.
-      if (drag && !canReparent(drag.id, node.entity.id)) {
+      // Refuse drops the model wouldn't allow: only show the move cursor
+      // when AT LEAST ONE dragged id has a matching HasChild edge to this
+      // target type. The drop handler filters out the disallowed ones.
+      if (drag && !drag.ids.some((id) => canReparent(id, node.entity.id))) {
         ev.dataTransfer.dropEffect = 'none';
         setDragOver(false);
         return;
@@ -326,10 +497,14 @@ function OntologyTreeNode({
   };
   const onDragLeave = () => setDragOver(false);
   const onDrop = (ev: React.DragEvent) => {
+    if (readOnly) return;
     setDragOver(false);
     const types = ev.dataTransfer.types;
     if (isSpatial && types.includes(PRIM_DRAG_MIME)) {
-      const primId = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+      const raw = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+      // Binding is single-target: an entity binds to one prim. If the user
+      // drags a multi-select, bind the primary (first id).
+      const primId = decodeDragIds(raw)[0];
       if (!primId) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -342,19 +517,43 @@ function OntologyTreeNode({
       });
       return;
     }
+    if (acceptsUsdAttach && types.includes(ASSET_DRAG_MIME)) {
+      const assetId = ev.dataTransfer.getData(ASSET_DRAG_MIME).trim();
+      if (!assetId) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const asset = ASSET_LIBRARY.find((a) => a.id === assetId);
+      const usdPath = `/usd_assets/${assetId}.usda`;
+      const suggestedName = `${node.entity.name} ${asset?.label ?? assetId}`;
+      onAttachUsd(node.entity.id, usdPath, suggestedName);
+      return;
+    }
+    if (acceptsUsdAttach && types.includes(PRIM_DRAG_MIME)) {
+      const raw = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+      const primId = decodeDragIds(raw)[0];
+      if (!primId) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      // Rebind to the *actual* dragged prim and drop the previously-bound
+      // prim, instead of spawning a duplicate from the USDA path.
+      onRebindUsdPrim(node.entity.id, primId);
+      return;
+    }
     if (types.includes(ENTITY_INSTANCE_DRAG_MIME)) {
-      const id = ev.dataTransfer.getData(ENTITY_INSTANCE_DRAG_MIME);
-      if (!id || id === node.entity.id) return;
+      const raw = ev.dataTransfer.getData(ENTITY_INSTANCE_DRAG_MIME);
+      const ids = decodeDragIds(raw).filter((id) => id && id !== node.entity.id);
+      if (ids.length === 0) return;
       const drag = dragRef.current;
       if (drag && drag.descendants.has(node.entity.id)) return;
       ev.preventDefault();
       ev.stopPropagation();
-      if (!canReparent(id, node.entity.id)) {
+      const allowed = ids.filter((id) => canReparent(id, node.entity.id));
+      if (allowed.length === 0) {
         setShake(true);
         dragRef.current = null;
         return;
       }
-      onReparent(id, node.entity.id);
+      for (const id of allowed) onReparent(id, node.entity.id);
       dragRef.current = null;
     }
   };
@@ -362,6 +561,7 @@ function OntologyTreeNode({
   return (
     <li>
       <div
+        ref={rowRef}
         className={
           'tree-node' +
           (dragOver ? ' is-drop-target' : '') +
@@ -371,7 +571,7 @@ function OntologyTreeNode({
           (shake ? ' is-shake-no' : '')
         }
         title={`${node.entity.type} · ${node.entity.id}`}
-        draggable={!isEditing}
+        draggable={!isEditing && !readOnly}
         onDragStart={onInstanceDragStart}
         onDragEnd={onInstanceDragEnd}
         onDragOver={onDragOver}
@@ -382,6 +582,7 @@ function OntologyTreeNode({
           if (shake) setShake(false);
         }}
         onContextMenu={(ev) => {
+          if (readOnly) return;
           ev.preventDefault();
           ev.stopPropagation();
           onContextMenu(node.entity.id, ev.clientX, ev.clientY);
@@ -390,9 +591,9 @@ function OntologyTreeNode({
         {hasChildren ? (
           <button
             type="button"
-            className={`tree-toggle${expanded ? ' is-expanded' : ''}`}
+            className={`tree-toggle${effectiveExpanded ? ' is-expanded' : ''}`}
             onClick={() => setExpanded((v) => !v)}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
+            aria-label={effectiveExpanded ? 'Collapse' : 'Expand'}
           >
             ▶
           </button>
@@ -417,7 +618,7 @@ function OntologyTreeNode({
           <span className="ontology-type">{node.entity.type}</span>
         </span>
       </div>
-      {hasChildren && expanded && (
+      {hasChildren && effectiveExpanded && (
         <ul>
           {node.children.map((c) => (
             <OntologyTreeNode
@@ -428,6 +629,8 @@ function OntologyTreeNode({
               selectedEntityIds={selectedEntityIds}
               resolvePrimAsAsset={resolvePrimAsAsset}
               onBind={onBind}
+              onAttachUsd={onAttachUsd}
+              onRebindUsdPrim={onRebindUsdPrim}
               onSelectEntity={onSelectEntity}
               onContextMenu={onContextMenu}
               editingId={editingId}
@@ -438,6 +641,8 @@ function OntologyTreeNode({
               dragRef={dragRef}
               descendantsById={descendantsById}
               depth={depth + 1}
+              forceExpand={forceExpand}
+              readOnly={readOnly}
             />
           ))}
         </ul>

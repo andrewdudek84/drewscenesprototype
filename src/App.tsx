@@ -4,6 +4,7 @@ import BottomPanel from './components/BottomPanel';
 import ContextMenu, {
   type ContextMenuItem
 } from './components/ContextMenu';
+import ConditionsPanel from './components/ConditionsPanel';
 import EntityModelsPanel, {
   HIDDEN_ENTITY_TYPE_NAMES
 } from './components/EntityModelsPanel';
@@ -11,14 +12,16 @@ import HierarchyPanel from './components/HierarchyPanel';
 import LeftToolbar from './components/LeftToolbar';
 import OntologyPanel from './components/OntologyPanel';
 import PropertiesPanel from './components/PropertiesPanel';
-import TopBar, { type Theme } from './components/TopBar';
+import TopBar, { type AppMode, type Theme } from './components/TopBar';
 import Viewport from './components/Viewport';
 import { ASSET_LIBRARY, getAsset } from './assets';
+import { createCondition, type Condition } from './conditions';
 import {
   addEntityInstance,
   addEntityType,
   addEntityTypeParent,
   applyBindingsToOntology,
+  attachUsdToInstance,
   buildModelTree,
   buildOntology,
   DEFAULT_ENTITY_TYPE,
@@ -43,7 +46,7 @@ import {
   type OntologyRelationship,
   type SpatialBinding
 } from './ontology';
-import { exportToUsda, parseUsda } from './usd';
+import { parseUsda } from './usd';
 import {
   KIND_LABELS,
   SPAWN_HALF_HEIGHT,
@@ -71,6 +74,18 @@ import type {
   Vec3
 } from './types';
 
+/** Cheap structural check used by the scene import path to tell an ontology
+ *  doc from the legacy combined envelope (`{ Scene, Ontology }`). */
+function looksLikeOntologyDoc(value: unknown): value is OntologyDoc {
+  if (!value || typeof value !== 'object') return false;
+  const instances = (value as { instances?: unknown }).instances;
+  if (!instances || typeof instances !== 'object') return false;
+  return (
+    Array.isArray((instances as { entities?: unknown }).entities) &&
+    Array.isArray((instances as { relationships?: unknown }).relationships)
+  );
+}
+
 export default function App() {
   const [inspectorSelection, setInspectorSelection] = useState<
     | { kind: 'model-type'; name: string }
@@ -81,6 +96,12 @@ export default function App() {
   // panel shows the instance form (takes priority over prim selection).
   // Cleared whenever the user picks something else (prim, model type, etc.).
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+  // Scene Editor mode: list of authored conditions and the currently-edited
+  // one. Selection is mutually exclusive with prim/instance/model-type
+  // selection — the Properties panel routes a non-null `selectedConditionId`
+  // to the ConditionForm before anything else.
+  const [conditions, setConditions] = useState<Condition[]>([]);
+  const [selectedConditionId, setSelectedConditionId] = useState<string | null>(null);
     const [prims, setPrims] = useState<PrimNode[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Additional prim ids selected on top of `selectedId` via Ctrl+click. The
@@ -114,6 +135,10 @@ export default function App() {
         : null;
     return saved === 'dark' ? 'dark' : 'light';
   });
+  // Top-level workspace mode. Ontology Editor is the default; Scene Editor /
+  // Scene Viewer switch the left-rail layout (Conditions panel appears in
+  // Scene Editor mode) without touching the underlying ontology state.
+  const [mode, setMode] = useState<AppMode>('ontology');
   // Scene (formerly Hierarchy) slide-out is hidden by default and toggled
   // from the topbar.
   const [sceneOpen, setSceneOpen] = useState(false);
@@ -394,6 +419,7 @@ export default function App() {
         }
         setInspectorSelection(null);
         setSelectedInstanceId(null);
+        setSelectedConditionId(null);
         setSelectedMeshUid(null);
         setSelectedId(nextPrimary);
         setAdditionalSelectedIds(nextAdditional);
@@ -401,6 +427,7 @@ export default function App() {
       }
       setInspectorSelection(null);
       setSelectedInstanceId(null);
+      setSelectedConditionId(null);
       setAdditionalSelectedIds([]);
       setSelectedId(id);
       setSelectedMeshUid(id ? meshUid : null);
@@ -408,10 +435,17 @@ export default function App() {
     [selectedId, additionalSelectedIds]
   );
 
-  // Viewport picks always promote selection to the topmost ancestor prim
-  // and never surface a sub-mesh — the user wants the whole asset selected
-  // (and outlined) when they click anything in the 3D view, regardless of
-  // which leaf mesh was hit.
+  // Viewport picks select the top-level prim of the clicked **asset**:
+  // walk up the parent chain (inclusive of self) until we find a prim with
+  // `assetId` set, and select that. Two cases this handles:
+  //   - Reference assets like HospitalBed: every loaded sub-mesh already
+  //     carries the bed prim's `primId`, so the walk stops at the bed.
+  //   - USDA-decomposed assets like Room: the asset spawns as a group prim
+  //     (with `assetId`) containing many child box prims for walls/floor.
+  //     The picked wall has no `assetId`, so we walk up to the Room group.
+  // If no ancestor has `assetId` (e.g. a plain Box prim dropped from the
+  // shapes palette), we just select the picked prim itself. `meshUid` is
+  // always dropped — clicks never select individual asset sub-meshes.
   const handleViewportSelect = useCallback(
     (
       id: string | null,
@@ -419,21 +453,26 @@ export default function App() {
       additive: boolean = false
     ) => {
       if (!id) {
-        if (!additive) handleSelect(null);
+        handleSelect(null, null, additive);
         return;
       }
       const byId = new Map(prims.map((p) => [p.id, p] as const));
       let cur = byId.get(id);
       if (!cur) {
-        if (!additive) handleSelect(null);
+        handleSelect(null, null, additive);
         return;
       }
-      while (cur.parentId) {
-        const parent = byId.get(cur.parentId);
-        if (!parent) break;
-        cur = parent;
+      let topAsset: PrimNode | null = null;
+      let walker: PrimNode | undefined = cur;
+      while (walker) {
+        if (walker.assetId) {
+          topAsset = walker;
+          break;
+        }
+        if (!walker.parentId) break;
+        walker = byId.get(walker.parentId);
       }
-      handleSelect(cur.id, null, additive);
+      handleSelect((topAsset ?? cur).id, null, additive);
     },
     [prims, handleSelect]
   );
@@ -482,6 +521,17 @@ export default function App() {
     () => ontologyDoc.model?.relationships ?? [],
     [ontologyDoc]
   );
+  // Live count of entity instances per type name, keyed by `entity.type`.
+  // Rendered as a small badge on the right of each Entity Models row;
+  // recomputed whenever the ontology doc changes so adding / removing /
+  // duplicating instances keeps the panel in sync automatically.
+  const instanceCountByType = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of ontologyDoc.instances.entities) {
+      m.set(e.type, (m.get(e.type) ?? 0) + 1);
+    }
+    return m;
+  }, [ontologyDoc]);
   const selectedModelType: OntologyEntityType | null = useMemo(() => {
     if (inspectorSelection?.kind !== 'model-type') return null;
     return (
@@ -490,6 +540,10 @@ export default function App() {
       ) ?? null
     );
   }, [inspectorSelection, ontologyDoc]);
+  const selectedCondition: Condition | null = useMemo(
+    () => conditions.find((b) => b.id === selectedConditionId) ?? null,
+    [conditions, selectedConditionId]
+  );
   const selectedModelRelationship: OntologyRelationship | null = useMemo(() => {
     if (inspectorSelection?.kind !== 'model-relationship') return null;
     return modelRelationships[inspectorSelection.index] ?? null;
@@ -510,6 +564,67 @@ export default function App() {
       });
     },
     []
+  );
+
+  const handleAttachUsdToInstance = useCallback(
+    (instanceId: string, usdPath: string, suggestedName?: string) => {
+      // Snapshot the existing USD-child binding BEFORE updating the doc so
+      // we can delete the previously-bound prim ("lose the old mapping")
+      // and parent the replacement under the same prim parent.
+      const existingUsdRel = ontologyDoc.instances.relationships.find(
+        (r) => r.type === 'HasUSD' && r.source === instanceId
+      );
+      const existingUsdId = existingUsdRel?.target ?? null;
+      const existingBinding = existingUsdId ? bindings[existingUsdId] : undefined;
+
+      const result = attachUsdToInstance(
+        ontologyDoc,
+        instanceId,
+        usdPath,
+        suggestedName
+      );
+      if (!result) return;
+      setOntologyDoc(result.doc);
+
+      const nextUsd = usdPath.trim();
+      if (!nextUsd) return;
+
+      let parentPrimId: string | null = null;
+      if (existingBinding) {
+        const oldPrim = prims.find((p) => p.id === existingBinding.guid);
+        parentPrimId = oldPrim?.parentId ?? null;
+        handleDelete(existingBinding.guid);
+      } else {
+        // No prior USD-child binding — spawn under the instance's own bound
+        // prim if it has one (rare, but covers asset-wrappers that already
+        // anchor a sub-tree in the scene).
+        const instBinding = bindings[instanceId];
+        if (instBinding) parentPrimId = instBinding.guid;
+      }
+
+      const instance = ontologyDoc.instances.entities.find(
+        (e) => e.id === instanceId
+      );
+      const spawned = spawnFromModelUsd(
+        nextUsd,
+        suggestedName?.trim() || instance?.name || '',
+        parentPrimId
+      );
+      if (!spawned) return;
+      setBindings((cur) => {
+        const next: Record<string, SpatialBinding> = {};
+        for (const [eid, b] of Object.entries(cur)) {
+          if (b.guid !== spawned.guid && eid !== result.usdId) next[eid] = b;
+        }
+        next[result.usdId] = {
+          guid: spawned.guid,
+          usd: nextUsd,
+          name: spawned.name
+        };
+        return next;
+      });
+    },
+    [ontologyDoc, bindings, prims, handleDelete, spawnFromModelUsd]
   );
 
   // ---- Undo stack (Ctrl/Cmd+Z, keeps the last 10 mutations) -----------
@@ -740,6 +855,7 @@ export default function App() {
   const handleSelectOntologyEntity = useCallback(
     (entityId: string, additive: boolean = false) => {
       setInspectorSelection(null);
+      setSelectedConditionId(null);
       let primId = primIdByEntityId.get(entityId);
       if (!primId) {
         // Parent rows have no prim of their own; fall back to the bound prim
@@ -810,11 +926,67 @@ export default function App() {
     [prims]
   );
 
+  // Rebind a USD child to an *existing* scene prim instead of spawning a
+  // fresh one. Fired when the user drags a viewport/Hierarchy prim onto an
+  // instance row (OntologyPanel) or onto the USD box (PropertiesPanel).
+  // The dragged prim stays put; the previously-bound prim is deleted so
+  // the old mapping is gone. `targetEntityId` can be either a non-USD
+  // instance (we'll upsert the HasUSD child) or a USD entity directly.
+  const handleRebindUsdInstancePrim = useCallback(
+    (targetEntityId: string, sourcePrimId: string) => {
+      if (!targetEntityId || !sourcePrimId) return;
+      const resolved = resolvePrimAsAsset(sourcePrimId);
+      if (!resolved) return;
+      const targetEntity = ontologyDoc.instances.entities.find(
+        (e) => e.id === targetEntityId
+      );
+      if (!targetEntity) return;
+
+      let usdEntityId: string;
+      if (targetEntity.type === 'USD') {
+        usdEntityId = targetEntityId;
+        setOntologyDoc((cur) =>
+          updateEntityInstance(cur, targetEntityId, {
+            usd: resolved.usdaUrl
+          })
+        );
+      } else {
+        const result = attachUsdToInstance(
+          ontologyDoc,
+          targetEntityId,
+          resolved.usdaUrl,
+          resolved.name
+        );
+        if (!result) return;
+        setOntologyDoc(result.doc);
+        usdEntityId = result.usdId;
+      }
+
+      const existingBinding = bindings[usdEntityId];
+      if (existingBinding && existingBinding.guid !== resolved.guid) {
+        handleDelete(existingBinding.guid);
+      }
+
+      setBindings((cur) => {
+        const next: Record<string, SpatialBinding> = {};
+        for (const [eid, b] of Object.entries(cur)) {
+          if (b.guid !== resolved.guid && eid !== usdEntityId) next[eid] = b;
+        }
+        next[usdEntityId] = {
+          guid: resolved.guid,
+          usd: resolved.usdaUrl,
+          name: resolved.name
+        };
+        return next;
+      });
+    },
+    [ontologyDoc, bindings, handleDelete, resolvePrimAsAsset]
+  );
+
   const handleExport = useCallback(() => {
-    // Combined scene file: { Scene: <usda text>, Ontology: <ontology doc> }.
-    // SpatialItem urls in the exported ontology reflect the current bindings
-    // so the saved file captures both the 3D scene and the entity\u2194asset map.
-    const usda = exportToUsda(prims, sceneName);
+    // Saved file is the ontology only — the USDA scene is composed on demand
+    // from the ontology's HasUSD edges + USD-child poses at load time, so we
+    // don't need to persist any monolithic USDA blob alongside it.
     const primPoseById = new Map(
       prims.map(
         (p) =>
@@ -825,10 +997,12 @@ export default function App() {
       )
     );
     const primParentById = new Map(prims.map((p) => [p.id, p.parentId] as const));
-    let ontologyOut = applyBindingsToOntology(ontologyDoc, bindings, primPoseById);
-    ontologyOut = ensureHasUsdEdges(ontologyOut, bindings, primParentById);
-    const payload = { Scene: usda, Ontology: ontologyOut };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    // Run ensureHasUsdEdges FIRST so fresh bindings get a HasUSD edge before
+    // applyBindingsToOntology walks those edges to stamp pose on the USD
+    // child entity.
+    let ontologyOut = ensureHasUsdEdges(ontologyDoc, bindings, primParentById);
+    ontologyOut = applyBindingsToOntology(ontologyOut, bindings, primPoseById);
+    const blob = new Blob([JSON.stringify(ontologyOut, null, 2)], {
       type: 'application/json;charset=utf-8'
     });
     const url = URL.createObjectURL(blob);
@@ -842,47 +1016,39 @@ export default function App() {
   }, [prims, sceneName, ontologyDoc, bindings]);
 
   const handleImport = useCallback(async (file: File) => {
+    const MAX_IMPORT_BYTES = 250 * 1024 * 1024;
+    if (file.size > MAX_IMPORT_BYTES) {
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      alert(
+        `"${file.name}" is ${sizeMb} MB. Scene imports are limited to 250 MB.`
+      );
+      return;
+    }
     try {
       const text = await file.text();
-      // Accept the combined JSON envelope (new format) or a legacy `.usda`.
-      const looksJson = /\.json$/i.test(file.name) || text.trimStart().startsWith('{');
-      let usdaText: string;
-      let ontologyOverride: OntologyDoc | null = null;
-      if (looksJson) {
-        const parsed = JSON.parse(text) as { Scene?: string; Ontology?: OntologyDoc };
-        if (typeof parsed.Scene !== 'string') {
-          throw new Error('Combined scene file is missing a "Scene" string.');
-        }
-        usdaText = parsed.Scene;
-        if (parsed.Ontology) ontologyOverride = parsed.Ontology;
-      } else {
-        usdaText = text;
+      const parsed = JSON.parse(text) as
+        | OntologyDoc
+        | { Ontology?: OntologyDoc; Scene?: string };
+      // Saved scenes are pure ontology JSON; the legacy combined envelope
+      // (`{ Scene, Ontology }`) is still accepted by pulling out its
+      // Ontology field — the Scene blob is ignored.
+      const doc: OntologyDoc | null = looksLikeOntologyDoc(parsed)
+        ? (parsed as OntologyDoc)
+        : looksLikeOntologyDoc(
+              (parsed as { Ontology?: OntologyDoc }).Ontology
+            )
+          ? ((parsed as { Ontology: OntologyDoc }).Ontology)
+          : null;
+      if (!doc) {
+        throw new Error('File is not a drewscenes ontology JSON.');
       }
 
-      const scene = parseUsda(usdaText);
-      setPrims(scene.prims);
+      // Reset scene state. Counters reset so auto-generated shape names
+      // start over for the freshly-loaded ontology.
       setSelectedId(null);
       setSelectedMeshUid(null);
       setSubMeshInfo(null);
       setAssetMeshes({});
-      if (ontologyOverride) {
-        setOntologyDoc(ontologyOverride);
-        const primById = new Map(scene.prims.map((p) => [p.id, p] as const));
-        const restored: Record<string, SpatialBinding> = {};
-        for (const e of ontologyOverride.instances.entities) {
-          const guid = e.guid ?? '';
-          const usd = e.usd ?? '';
-          if (!guid || !usd) continue;
-          const prim = primById.get(guid);
-          if (!prim) continue;
-          restored[e.id] = { guid, usd, name: prim.name };
-        }
-        setBindings(restored);
-      } else {
-        setBindings({});
-      }
-      const nameFromFile = file.name.replace(/\.(json|usda?|txt)$/i, '');
-      setSceneName(nameFromFile || scene.sceneName || 'Loaded Scene');
       countersRef.current = {
         box: 0,
         cylinder: 0,
@@ -892,12 +1058,96 @@ export default function App() {
         group: 0,
         reference: 0
       };
+
+      // Materialize viewport prims from the ontology. For each non-USD
+      // instance entity that owns a HasUSD edge, spawn the USD child's
+      // geometry, apply its pose (local to the parent prim), and record the
+      // binding from the parent entity to the spawned root prim.
+      const entityById = new Map(doc.instances.entities.map((e) => [e.id, e] as const));
+      const usdChildBySource = new Map<string, string>();
+      const parentByEntity = new Map<string, string>();
+      for (const r of doc.instances.relationships) {
+        if (r.type === 'HasUSD') {
+          usdChildBySource.set(r.source, r.target);
+        } else if (r.type === 'HasChild') {
+          const src = entityById.get(r.source);
+          const tgt = entityById.get(r.target);
+          if (!src || !tgt) continue;
+          if (src.type === 'USD' || tgt.type === 'USD') continue;
+          parentByEntity.set(r.target, r.source);
+        }
+      }
+
+      // Topologically order non-USD entities: ancestors before descendants.
+      const orderedIds: string[] = [];
+      const visited = new Set<string>();
+      const visit = (id: string) => {
+        if (visited.has(id)) return;
+        visited.add(id);
+        const parentId = parentByEntity.get(id);
+        if (parentId) visit(parentId);
+        const ent = entityById.get(id);
+        if (ent && ent.type !== 'USD') orderedIds.push(id);
+      };
+      for (const e of doc.instances.entities) {
+        if (e.type !== 'USD') visit(e.id);
+      }
+
+      const newPrims: PrimNode[] = [];
+      const newBindings: Record<string, SpatialBinding> = {};
+      for (const entityId of orderedIds) {
+        const ent = entityById.get(entityId);
+        if (!ent) continue;
+        const usdEntId = usdChildBySource.get(entityId);
+        if (!usdEntId) continue;
+        const usdEnt = entityById.get(usdEntId);
+        if (!usdEnt || !usdEnt.usd) continue;
+        const parentEntId = parentByEntity.get(entityId);
+        const parentPrimId = parentEntId
+          ? newBindings[parentEntId]?.guid ?? null
+          : null;
+        const guid = buildPrimsFromUsd(
+          usdEnt.usd,
+          ent.name,
+          parentPrimId,
+          newPrims
+        );
+        if (!guid) continue;
+        const idx = newPrims.findIndex((p) => p.id === guid);
+        if (idx >= 0) {
+          const cur = newPrims[idx];
+          newPrims[idx] = {
+            ...cur,
+            position: usdEnt.position
+              ? [usdEnt.position.x, usdEnt.position.y, usdEnt.position.z]
+              : cur.position,
+            rotation: usdEnt.rotation
+              ? [usdEnt.rotation.x, usdEnt.rotation.y, usdEnt.rotation.z]
+              : cur.rotation,
+            scale: usdEnt.scale
+              ? [usdEnt.scale.x, usdEnt.scale.y, usdEnt.scale.z]
+              : cur.scale
+          };
+        }
+        newBindings[entityId] = {
+          guid,
+          usd: usdEnt.usd,
+          name: newPrims[idx]?.name ?? ent.name
+        };
+      }
+
+      setOntologyDoc(doc);
+      setPrims(newPrims);
+      setBindings(newBindings);
+      const nameFromFile = file.name.replace(/\.(json|usda?|txt)$/i, '');
+      setSceneName(nameFromFile || 'Loaded Scene');
     } catch (err) {
       console.error('Scene load failed', err);
       alert(
-        'Could not load that file. Expected a .json scene saved by drewscenes (or a legacy .usda).'
+        'Could not load that file. Expected a .json ontology saved by drewscenes.'
       );
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Spawn an asset's prim tree at a viewport drop point. Wrap everything in a
@@ -941,7 +1191,10 @@ export default function App() {
       console.error('Asset parse failed', assetId, err);
       return null;
     }
-    if (parsed.prims.length === 0) return null;
+    // An empty USDA (e.g. the Placeholder asset, which is just a named
+    // wrapper Xform with no children) parses to zero inner prims. That's
+    // fine: the outer groupPrim below is sufficient as a usable empty
+    // container, so we don't bail in that case.
 
     const groupId = newId();
     const groupPrim: PrimNode = {
@@ -973,6 +1226,84 @@ export default function App() {
     ['plane', 'plane'],
     ['cone', 'cone']
   ]);
+
+  // Resolve a USD path (shape or asset) into prims appended to `accumulator`,
+  // returning the id of the root prim. Used by the ontology-driven load path
+  // to materialize the viewport without going through `setPrims`, so every
+  // spawned instance's id is known synchronously and downstream entities can
+  // be parented under it in the same pass.
+  function buildPrimsFromUsd(
+    usdPath: string,
+    instanceName: string,
+    parentPrimId: string | null,
+    accumulator: PrimNode[]
+  ): string | null {
+    const raw = usdPath.trim();
+    if (!raw) return null;
+    const normalized = raw.replace(/^\.\//, '').replace(/^\/+/, '');
+    const lower = normalized.toLowerCase();
+
+    const shapeMatch = /(?:^|\/)usd_shapes\/([^/]+)\.usd[ac]?$/i.exec(normalized);
+    if (shapeMatch) {
+      const kind = SHAPE_KIND_BY_USDA.get(shapeMatch[1].toLowerCase());
+      if (!kind) return null;
+      const n = (countersRef.current[kind] ?? 0) + 1;
+      countersRef.current[kind] = n;
+      const name = instanceName.trim() || `${KIND_LABELS[kind]}_${n}`;
+      const halfH = SPAWN_HALF_HEIGHT[kind];
+      const prim: PrimNode = {
+        id: newId(),
+        name,
+        kind,
+        position: parentPrimId ? [0, 0, 0] : [0, halfH, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+        parentId: parentPrimId,
+        color: DEFAULT_COLOR
+      };
+      accumulator.push(prim);
+      return prim.id;
+    }
+
+    let assetHint: string | null = null;
+    const nestedAssetMatch = /(?:^|\/)usd_assets\/([^/]+)\//i.exec(normalized);
+    if (nestedAssetMatch) assetHint = nestedAssetMatch[1];
+    const wrapperAssetMatch = /(?:^|\/)usd_assets\/([^/]+)\.usd[ac]?$/i.exec(normalized);
+    if (!assetHint && wrapperAssetMatch) assetHint = wrapperAssetMatch[1];
+    if (!assetHint && lower.includes('hospitalbed')) assetHint = 'HospitalBed';
+    if (!assetHint) return null;
+    const matchedAssetId =
+      ASSET_LIBRARY.find((a) => a.id.toLowerCase() === assetHint!.toLowerCase())
+        ?.id ?? null;
+    if (!matchedAssetId) return null;
+    const asset = getAsset(matchedAssetId);
+    if (!asset) return null;
+    let parsed;
+    try {
+      parsed = parseUsda(asset.usda);
+    } catch (err) {
+      console.error('Asset parse failed', matchedAssetId, err);
+      return null;
+    }
+    const groupId = newId();
+    const groupName = instanceName.trim() || parsed.sceneName || asset.label;
+    const groupPrim: PrimNode = {
+      id: groupId,
+      name: groupName,
+      kind: 'group',
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      parentId: parentPrimId,
+      assetId: matchedAssetId,
+      color: DEFAULT_COLOR
+    };
+    accumulator.push(groupPrim);
+    for (const p of parsed.prims) {
+      accumulator.push(p.parentId === null ? { ...p, parentId: groupId } : p);
+    }
+    return groupId;
+  }
 
   // USD-backed entity models spawn directly into the viewport and return the
   // created prim id so the instance's companion SpatialItem can be bound.
@@ -1194,6 +1525,7 @@ export default function App() {
     setSelectedMeshUid(null);
     setSubMeshInfo(null);
     setSelectedInstanceId(null);
+    setSelectedConditionId(null);
     setInspectorSelection({ kind: 'model-type', name });
   }, []);
 
@@ -1202,8 +1534,101 @@ export default function App() {
     setSelectedMeshUid(null);
     setSubMeshInfo(null);
     setSelectedInstanceId(null);
+    setSelectedConditionId(null);
     setInspectorSelection({ kind: 'model-relationship', index });
   }, []);
+
+  const handleAddCondition = useCallback(() => {
+    setConditions((cur) => {
+      const taken = new Set(cur.map((b) => b.name));
+      let n = cur.length + 1;
+      let pick = `Condition ${n}`;
+      while (taken.has(pick)) {
+        n += 1;
+        pick = `Condition ${n}`;
+      }
+      const created = createCondition(pick);
+      // Selection state lives outside this updater; defer with a
+      // microtask so it lands after the new condition is committed.
+      queueMicrotask(() => setSelectedConditionId(created.id));
+      return [...cur, created];
+    });
+    setSelectedId(null);
+    setAdditionalSelectedIds([]);
+    setSelectedMeshUid(null);
+    setSubMeshInfo(null);
+    setSelectedInstanceId(null);
+    setInspectorSelection(null);
+  }, []);
+
+  const handleSelectCondition = useCallback((id: string) => {
+    setSelectedConditionId(id);
+    setSelectedId(null);
+    setAdditionalSelectedIds([]);
+    setSelectedMeshUid(null);
+    setSubMeshInfo(null);
+    setSelectedInstanceId(null);
+    setInspectorSelection(null);
+  }, []);
+
+  const handleDeleteCondition = useCallback((id: string) => {
+    setConditions((cur) => cur.filter((b) => b.id !== id));
+    setSelectedConditionId((cur) => (cur === id ? null : cur));
+  }, []);
+
+  const handleUpdateCondition = useCallback(
+    (id: string, patch: Partial<Omit<Condition, 'id'>>) => {
+      setConditions((cur) =>
+        cur.map((b) => (b.id === id ? { ...b, ...patch } : b))
+      );
+    },
+    []
+  );
+
+  const handleDuplicateCondition = useCallback((id: string) => {
+    setConditions((cur) => {
+      const src = cur.find((b) => b.id === id);
+      if (!src) return cur;
+      const taken = new Set(cur.map((b) => b.name));
+      const clone: Condition = {
+        id: newId(),
+        name: nextDuplicateName(src.name, taken),
+        // ViewRules need fresh ids so future edits don't alias the original.
+        viewRules: src.viewRules.map((r) => ({ ...r, id: newId() }))
+      };
+      queueMicrotask(() => setSelectedConditionId(clone.id));
+      const idx = cur.findIndex((b) => b.id === id);
+      const next = cur.slice();
+      next.splice(idx + 1, 0, clone);
+      return next;
+    });
+  }, []);
+
+  const handleConditionContextMenu = useCallback(
+    (id: string | null, x: number, y: number) => {
+      if (!id) {
+        setMenu({
+          x,
+          y,
+          items: [{ label: 'Add condition', onClick: handleAddCondition }]
+        });
+        return;
+      }
+      setMenu({
+        x,
+        y,
+        items: [
+          { label: 'Duplicate', onClick: () => handleDuplicateCondition(id) },
+          {
+            label: 'Delete',
+            destructive: true,
+            onClick: () => handleDeleteCondition(id)
+          }
+        ]
+      });
+    },
+    [handleAddCondition, handleDuplicateCondition, handleDeleteCondition]
+  );
 
   const handleUpdateModelType = useCallback(
     (name: string, patch: Partial<Omit<OntologyEntityType, 'name'>>) => {
@@ -1319,15 +1744,27 @@ export default function App() {
     []
   );
 
-  // Live entity instance that the Properties panel is editing. Re-resolved
-  // from the ontology doc each render so edits flow back into the form.
+  // Live entity instance that the Properties panel is editing. Resolved
+  // from `selectedInstanceId` when set (Ontology panel pick), otherwise
+  // derived from the bound prim (Viewport / Hierarchy pick) by walking the
+  // HasUSD edge back to the non-USD instance parent. Re-resolved from the
+  // ontology doc each render so edits flow back into the form.
   const selectedInstance: OntologyEntity | null = useMemo(() => {
-    if (!selectedInstanceId) return null;
-    return (
-      ontologyDoc.instances.entities.find((e) => e.id === selectedInstanceId) ??
-      null
+    const fromPick = collapseUsdChildToParent(
+      selectedId ? entityIdByPrimId.get(selectedId) ?? null : null
     );
-  }, [selectedInstanceId, ontologyDoc]);
+    const effectiveId = selectedInstanceId ?? fromPick;
+    if (!effectiveId) return null;
+    return (
+      ontologyDoc.instances.entities.find((e) => e.id === effectiveId) ?? null
+    );
+  }, [
+    selectedInstanceId,
+    selectedId,
+    entityIdByPrimId,
+    collapseUsdChildToParent,
+    ontologyDoc
+  ]);
 
   // Hidden USD child of the selected non-USD instance, if any. Merged into
   // the Properties form so the parent row visibly owns its USD pose/USD
@@ -1607,9 +2044,18 @@ export default function App() {
       // are no longer multi-selected). For bound roots we route through
       // the prim selection so the viewport gizmo follows; selectedInstanceId
       // tracks the last new root so unbound roots still highlight in the
-      // ontology tree.
+      // ontology tree. Bindings live on the HasUSD *child* entity, so for a
+      // typical non-USD root we resolve its USD child via the new doc to
+      // pick the right viewport prim.
       const newBoundPrimIds = newRootIds
-        .map((rid) => allNewBindings[rid]?.guid)
+        .map((rid) => {
+          if (allNewBindings[rid]?.guid) return allNewBindings[rid].guid;
+          const usdRel = doc.instances.relationships.find(
+            (r) => r.type === 'HasUSD' && r.source === rid
+          );
+          const usdChildId = usdRel?.target;
+          return usdChildId ? allNewBindings[usdChildId]?.guid : undefined;
+        })
         .filter((g): g is string => Boolean(g));
       const lastRoot = newRootIds[newRootIds.length - 1] ?? null;
       if (newBoundPrimIds.length > 0) {
@@ -1852,7 +2298,7 @@ export default function App() {
   );
 
   return (
-    <div className="layout">
+    <div className={`layout${mode === 'scene-editor' ? ' is-scene-editor' : ''}`}>
       <TopBar
         sceneName={sceneName}
         onSceneNameChange={setSceneName}
@@ -1860,6 +2306,8 @@ export default function App() {
         onImport={handleImport}
         theme={theme}
         onThemeChange={setTheme}
+        mode={mode}
+        onModeChange={setMode}
       />
       <main className="viewport-area">
         <Viewport
@@ -1881,6 +2329,7 @@ export default function App() {
           onContextMenu={handleContextMenu}
           onBeginTransformBatch={handleBeginTransformBatch}
           onEndTransformBatch={handleEndTransformBatch}
+          dropEnabled={mode !== 'scene-editor'}
         />
         <LeftToolbar
           tool={tool}
@@ -1890,6 +2339,7 @@ export default function App() {
           onSnapToggle={() => setSnapEnabled((v) => !v)}
           sceneOpen={sceneOpen}
           onToggleScene={() => setSceneOpen((v) => !v)}
+          readOnly={mode === 'scene-editor'}
         />
       </main>
       <HierarchyPanel
@@ -1907,6 +2357,7 @@ export default function App() {
         onContextMenu={handleContextMenu}
         isOpen={sceneOpen}
         onClose={() => setSceneOpen(false)}
+        readOnly={mode === 'scene-editor'}
       />
       <PropertiesPanel
         prim={selectedPrim}
@@ -1927,8 +2378,23 @@ export default function App() {
         onUpdateModelType={handleUpdateModelType}
         onUpdateModelRelationship={handleUpdateModelRelationship}
         onUpdateEntityInstance={handleUpdateEntityInstance}
+        resolvePrimAsUsd={(primId) => resolvePrimAsAsset(primId)?.usdaUrl ?? null}
+        onRebindUsdPrim={handleRebindUsdInstancePrim}
+        condition={selectedCondition}
+        onUpdateCondition={handleUpdateCondition}
+        readOnly={mode === 'scene-editor' && !selectedCondition}
       />
       <div className="left-stack">
+        {mode === 'scene-editor' && (
+          <ConditionsPanel
+            conditions={conditions}
+            selectedConditionId={selectedConditionId}
+            onAdd={handleAddCondition}
+            onSelect={handleSelectCondition}
+            onDelete={handleDeleteCondition}
+            onContextMenu={handleConditionContextMenu}
+          />
+        )}
         <EntityModelsPanel
           roots={modelRoots}
           modelRelationships={modelRelationships}
@@ -1942,6 +2408,7 @@ export default function App() {
               ? inspectorSelection.index
               : null
           }
+          instanceCountByType={instanceCountByType}
           onAddType={() => handleAddType(null)}
           onSelectType={handleSelectModelType}
           onSelectRelationship={handleSelectModelRelationship}
@@ -1951,6 +2418,7 @@ export default function App() {
           onCancelRename={handleCancelTypeRename}
           onReparent={handleReparentType}
           canReparent={canReparentType}
+          readOnly={mode === 'scene-editor'}
         />
         <OntologyPanel
           roots={ontology.roots}
@@ -1960,6 +2428,8 @@ export default function App() {
           onBind={handleBind}
           onSelectEntity={handleSelectOntologyEntity}
           resolvePrimAsAsset={resolvePrimAsAsset}
+          onAttachUsd={handleAttachUsdToInstance}
+          onRebindUsdPrim={handleRebindUsdInstancePrim}
           onAddInstance={handleAddInstance}
           onContextMenu={handleInstanceContextMenu}
           editingId={editingInstanceId}
@@ -1967,9 +2437,10 @@ export default function App() {
           onCancelRename={handleCancelInstanceRename}
           onReparent={handleReparentInstance}
           canReparent={canReparentInstance}
+          readOnly={mode === 'scene-editor'}
         />
       </div>
-      <BottomPanel />
+      {mode !== 'scene-editor' && <BottomPanel />}
       {menu && (
         <ContextMenu
           x={menu.x}

@@ -16,7 +16,7 @@ const SHAPES_URL_PREFIX = '/usd_shapes/';
 // Allowlist entries must match a top-level entry under `usd_assets/`:
 // either a folder name (e.g. 'Conveyors') or the basename of a sibling
 // `*.usda` / `*.glb` (e.g. 'shelves_01').
-const DIST_ASSET_ALLOWLIST = ['HospitalBed', 'Room'];
+const DIST_ASSET_ALLOWLIST = ['HospitalBed', 'Room', 'Placeholder'];
 
 // Make usd_assets/ available at /usd_assets/* in dev (via middleware) and
 // copied verbatim into dist/usd_assets/ on build. We need stable, original

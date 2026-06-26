@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AssetMeshNode, PrimNode, ShapeKind } from '../types';
-import { ASSET_DRAG_MIME, PRIM_DRAG_MIME, SHAPE_DRAG_MIME } from '../shapes';
+import {
+  ASSET_DRAG_MIME,
+  PRIM_DRAG_MIME,
+  SHAPE_DRAG_MIME,
+  encodeDragIds,
+  decodeDragIds
+} from '../shapes';
 
 interface Props {
   prims: PrimNode[];
@@ -32,6 +38,11 @@ interface Props {
   /** Slide-out open state. When false the panel is translated off-screen. */
   isOpen: boolean;
   onClose: () => void;
+  /** Scene Editor mode: suppress authoring affordances. Drag-drop
+   *  reparenting, the per-row trash button, and the right-click context
+   *  menu are all hidden / disabled. Click-to-select and expand/collapse
+   *  remain interactive. */
+  readOnly?: boolean;
 }
 
 export default function HierarchyPanel({
@@ -48,7 +59,8 @@ export default function HierarchyPanel({
   onDelete,
   onContextMenu,
   isOpen,
-  onClose
+  onClose,
+  readOnly = false
 }: Props) {
   const childrenByParent = useMemo(() => {
     const m = new Map<string | null, PrimNode[]>();
@@ -99,6 +111,7 @@ export default function HierarchyPanel({
   };
 
   const onRootDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     const kind = dragKind(ev);
     if (!kind) return;
     ev.preventDefault();
@@ -107,6 +120,7 @@ export default function HierarchyPanel({
   };
   const onRootDragLeave = () => setRootDragOver(false);
   const onRootDrop = (ev: React.DragEvent) => {
+    if (readOnly) return;
     const kind = dragKind(ev);
     setRootDragOver(false);
     if (!kind) return;
@@ -118,8 +132,11 @@ export default function HierarchyPanel({
       const assetId = ev.dataTransfer.getData(ASSET_DRAG_MIME);
       if (assetId) onAssetAdd(assetId, null);
     } else {
-      const id = ev.dataTransfer.getData(PRIM_DRAG_MIME);
-      if (id) onReparent(id, null);
+      const raw = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+      // Multi-select drag: a single drop reparents every selected prim.
+      // App.handleReparent's setPrims updaters chain through the React 18
+      // batch so all moves land in one render + one undo entry.
+      for (const id of decodeDragIds(raw)) onReparent(id, null);
     }
   };
 
@@ -170,6 +187,7 @@ export default function HierarchyPanel({
                     onAssetAdd={onAssetAdd}
                     onDelete={onDelete}
                     onContextMenu={onContextMenu}
+                    readOnly={readOnly}
                   />
                 ))}
               </ul>
@@ -203,6 +221,8 @@ interface NodeProps {
   onAssetAdd: (assetId: string, parentId: string | null) => void;
   onDelete: (id: string) => void;
   onContextMenu: (primId: string, x: number, y: number) => void;
+  /** Suppresses drag-drop, right-click menu, and the per-row trash button. */
+  readOnly?: boolean;
 }
 
 function TreeNode({
@@ -219,7 +239,8 @@ function TreeNode({
   onShapeAdd,
   onAssetAdd,
   onDelete,
-  onContextMenu
+  onContextMenu,
+  readOnly = false
 }: NodeProps) {
   const kids = childrenByParent.get(prim.id) ?? [];
   const subMeshes =
@@ -247,7 +268,19 @@ function TreeNode({
   };
 
   const onDragStart = (ev: React.DragEvent) => {
-    ev.dataTransfer.setData(PRIM_DRAG_MIME, prim.id);
+    if (readOnly) {
+      ev.preventDefault();
+      return;
+    }
+    // If this prim is part of the current multi-selection, drag the whole
+    // set so a single drop reparents every selected item. Otherwise drag
+    // just this prim. Encoded as a JSON array; decodeDragIds tolerates the
+    // legacy single-id format.
+    const dragIds =
+      selectedIds.includes(prim.id) && selectedIds.length > 1
+        ? selectedIds
+        : [prim.id];
+    ev.dataTransfer.setData(PRIM_DRAG_MIME, encodeDragIds(dragIds));
     ev.dataTransfer.setData('text/plain', prim.name);
     // 'all' so both intra-hierarchy reparent ('move') and ontology binding
     // ('link') drop targets are accepted by the browser.
@@ -255,6 +288,7 @@ function TreeNode({
     ev.stopPropagation();
   };
   const onDragOver = (ev: React.DragEvent) => {
+    if (readOnly) return;
     const kind = dragKind(ev);
     if (!kind) return;
     ev.preventDefault();
@@ -264,6 +298,7 @@ function TreeNode({
   };
   const onDragLeave = () => setDragOver(false);
   const onDrop = (ev: React.DragEvent) => {
+    if (readOnly) return;
     const kind = dragKind(ev);
     setDragOver(false);
     if (!kind) return;
@@ -279,15 +314,20 @@ function TreeNode({
       if (assetId) onAssetAdd(assetId, prim.id);
       return;
     }
-    const id = ev.dataTransfer.getData(PRIM_DRAG_MIME);
-    if (!id || id === prim.id) return;
-    onReparent(id, prim.id);
+    const raw = ev.dataTransfer.getData(PRIM_DRAG_MIME);
+    // Reparent every dragged prim onto this row (skipping self). React
+    // 18 batches the chained setPrims updaters into one commit + one undo
+    // entry.
+    for (const id of decodeDragIds(raw)) {
+      if (id && id !== prim.id) onReparent(id, prim.id);
+    }
   };
   const onClick = (ev: React.MouseEvent) => {
     ev.stopPropagation();
     onSelect(prim.id, null, ev.ctrlKey || ev.metaKey);
   };
   const onRowContextMenu = (ev: React.MouseEvent) => {
+    if (readOnly) return;
     ev.preventDefault();
     ev.stopPropagation();
     onSelect(prim.id);
@@ -322,7 +362,7 @@ function TreeNode({
           (isInMultiSelection ? ' is-multi-selected' : '') +
           (dragOver ? ' is-drop-target' : '')
         }
-        draggable
+        draggable={!readOnly}
         onDragStart={onDragStart}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -363,35 +403,37 @@ function TreeNode({
           )}
         </span>
         <span className="tree-label">{prim.name}</span>
-        <button
-          type="button"
-          className="tree-delete"
-          title={`Delete ${prim.name}`}
-          aria-label={`Delete ${prim.name}`}
-          draggable={false}
-          onClick={(ev) => {
-            ev.stopPropagation();
-            onDelete(prim.id);
-          }}
-          onMouseDown={(ev) => ev.stopPropagation()}
-        >
-          <svg
-            viewBox="0 0 16 16"
-            width="12"
-            height="12"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
+        {!readOnly && (
+          <button
+            type="button"
+            className="tree-delete"
+            title={`Delete ${prim.name}`}
+            aria-label={`Delete ${prim.name}`}
+            draggable={false}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onDelete(prim.id);
+            }}
+            onMouseDown={(ev) => ev.stopPropagation()}
           >
-            <path d="M3 4 L13 4" />
-            <path d="M6.5 4 V2.5 H9.5 V4" />
-            <path d="M4.5 4 L5 13.5 H11 L11.5 4" />
-            <path d="M6.5 6.5 V11.5 M9.5 6.5 V11.5" />
-          </svg>
-        </button>
+            <svg
+              viewBox="0 0 16 16"
+              width="12"
+              height="12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 4 L13 4" />
+              <path d="M6.5 4 V2.5 H9.5 V4" />
+              <path d="M4.5 4 L5 13.5 H11 L11.5 4" />
+              <path d="M6.5 6.5 V11.5 M9.5 6.5 V11.5" />
+            </svg>
+          </button>
+        )}
       </div>
       {expanded && kids.length > 0 && (
         <ul>
@@ -412,6 +454,7 @@ function TreeNode({
               onAssetAdd={onAssetAdd}
               onDelete={onDelete}
               onContextMenu={onContextMenu}
+              readOnly={readOnly}
             />
           ))}
         </ul>
